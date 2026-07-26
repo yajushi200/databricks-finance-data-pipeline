@@ -1,0 +1,20 @@
+# Databricks CLI credentials
+.databrickscfg
+
+# Databricks Asset Bundle build output
+.databricks/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaging
+*.egg-info/
+build/
+dist/

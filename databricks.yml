@@ -1,0 +1,12 @@
+bundle:
+  name: fraud-detection-lakehouse
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      profile: free
