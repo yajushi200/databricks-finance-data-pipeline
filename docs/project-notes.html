@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Notes — Fraud Detection Lakehouse</title>
+<style>
+  :root {
+    --ink: #1a1a2e; --muted: #5c5c70; --accent: #e0533d; --bg: #faf9f6;
+    --card: #ffffff; --line: #e8e6e0; --code-bg: #f0eeea;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif; color: var(--ink);
+    background: var(--bg); margin: 0; line-height: 1.65;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 24px 80px; }
+  h1 { font-size: 2.1rem; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 32px; font-style: italic; }
+  .toc {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 18px 24px; margin-bottom: 8px;
+  }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .note-header {
+    margin-top: 72px; padding: 14px 20px; background: var(--ink); color: #fff;
+    border-radius: 6px 6px 0 0; font-size: 1.4rem; font-weight: bold;
+  }
+  .note-date { font-size: 0.85rem; font-weight: normal; opacity: 0.75; }
+  h2 {
+    font-size: 1.3rem; margin-top: 44px; padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+  }
+  h3 { font-size: 1.05rem; margin-top: 28px; }
+  code, pre {
+    font-family: Consolas, 'Courier New', monospace; background: var(--code-bg);
+    border-radius: 4px; font-size: 0.9em;
+  }
+  code { padding: 2px 6px; }
+  pre { padding: 14px 18px; overflow-x: auto; border: 1px solid var(--line); }
+  pre code { padding: 0; background: none; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 10px 14px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); font-size: 0.9rem; }
+  .why { color: var(--accent); font-weight: bold; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+    padding: 16px 20px; margin: 20px 0; border-radius: 4px;
+  }
+  .card p:first-child { margin-top: 0; } .card p:last-child { margin-bottom: 0; }
+  .phase {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 20px 24px; margin: 24px 0;
+  }
+  .phase h3 { margin-top: 0; color: var(--accent); }
+  .learn { font-size: 0.92rem; color: var(--muted); }
+  .learn strong { color: var(--ink); }
+  .tree { line-height: 1.5; }
+  .done { color: #2e7d32; }
+  .footer { margin-top: 60px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Project Notes</h1>
+<p class="subtitle">Fraud Detection Lakehouse · Databricks Free Edition · running log, newest note at the bottom</p>
+
+<div class="card" id="state">
+<p><strong>WHERE WE ARE</strong> &nbsp;·&nbsp; <em>updated 12 Aug 2026 — check here first if you lose the thread</em></p>
+<table>
+<tr><th>Thing</th><th>Current state</th></tr>
+<tr><td>Layer in progress</td><td><span class="done">Bronze complete</span> for 5 batches: <code>workspace.bronze.transactions</code>, <strong>1,068,592 rows</strong> (2026-06-01 → 06-05), all counts verified against source. <strong>Silver: designed (Note 10), not yet built.</strong></td></tr>
+<tr><td>Ingestion ladder</td><td>Rung 1 (naive append) built, deliberately broken, <span class="done">fixed with rung 2: <code>replaceWhere</code> per batch_date</span> (Note 08). Parameterized via widget <code>p_batch_date</code>. Rungs 3–4 later.</td></tr>
+<tr><td>Landing volume</td><td>All 31 daily folders uploaded via <code>databricks fs cp -r</code>. Days 6–31 ingest whenever needed — just a widget value.</td></tr>
+<tr><td>Working in</td><td>Databricks notebooks (<code>00_helpers/config</code>, <code>01_bronze/01_ingest_transactions</code>, <code>02_profile_bronze</code>). Repo not yet connected to workspace; <code>src/</code> + pytest start with silver.</td></tr>
+<tr><td>Next up</td><td>Write <code>src/transforms/silver_transactions.py</code> — a pure <code>to_silver(df)</code> function (no read/write inside) — casts and renames first, then derived columns, with pytest tests</td></tr>
+</table>
+</div>
+
+<h2 style="margin-top:32px">Decisions currently in force</h2>
+<p><em>The single source of truth. History and reasoning live in the notes; this table is just the standing law.</em></p>
+<table>
+<tr><th>Decision</th><th>Where reasoned</th></tr>
+<tr><td>Bronze reads <strong>all columns as STRING</strong> — "bronze keeps, silver converts"</td><td>Note 07</td></tr>
+<tr><td>Explicit <code>StructType</code> + <code>header=true</code> + <code>enforceSchema=false</code>; never <code>inferSchema</code></td><td>Notes 05, 06</td></tr>
+<tr><td>Audit columns on every bronze row: <code>source_file</code> (from <code>_metadata.file_path</code>), <code>ingest_timestamp</code>, <code>batch_date</code></td><td>Note 03</td></tr>
+<tr><td>Writes are <strong>idempotent per batch</strong>: <code>mode("overwrite")</code> + <code>replaceWhere</code> on <code>batch_date</code>. No plain append, no row-level MERGE in bronze</td><td>Note 08</td></tr>
+<tr><td>Storage: catalog <code>workspace</code>; schemas <code>bronze/silver/gold/ops</code>; landing volume disposable after 30 days</td><td>Note 03</td></tr>
+<tr><td>Names: underscores only — no spaces, dots, or hyphens in folders/notebooks</td><td>Note 04</td></tr>
+<tr><td>Config values (paths, catalog names) live in <code>00_helpers/config</code> and nowhere else</td><td>Note 04</td></tr>
+<tr><td>Profile bronze before designing silver; design backwards, build forwards</td><td>Note 03</td></tr>
+</table>
+<p><strong>Two words that sound the same and are not:</strong> <code>enforceSchema=false</code> is a <em>Spark CSV option</em> meaning "read the file's header and check it matches mine". "Don't enforce types in bronze" is <em>medallion guidance</em> meaning "don't cast to double/int". We follow both.</p>
+
+<div class="toc">
+<strong>Contents</strong> · <em>each note = one lesson, chronological; superseded parts are marked, not deleted</em><br><br>
+<strong>Setting up</strong><br>
+<a href="#note01">Note 01 — Project Skeleton &amp; the Databricks CLI</a> · <span class="s" style="font-size:0.9em;color:var(--muted)">why the repo looks like a software project</span><br>
+<a href="#note02">Note 02 — Learning Roadmap</a> · <span style="font-size:0.9em;color:var(--muted)">the five phases, dataset choice, platform decisions</span><br>
+<strong>Understanding the source</strong><br>
+<a href="#note03">Note 03 — Source Interview &amp; Bronze Design</a> · <span style="font-size:0.9em;color:var(--muted)">what the data is, fraud pattern, bronze contract, profiling checklist</span><br>
+<strong>Building bronze</strong><br>
+<a href="#note04">Note 04 — Notebook Structure &amp; the <code>%run</code> Path Error</a> · <span style="font-size:0.9em;color:var(--muted)">config notebook, naming hygiene</span><br>
+<a href="#note05">Note 05 — First Read: Everything Is a String</a> · <span style="font-size:0.9em;color:var(--muted)">why CSV types lie, lexicographic sorting trap</span><br>
+<a href="#note06">Note 06 — When the Source Changes: Schema Evolution</a> · <span style="font-size:0.9em;color:var(--muted)">three silent failure modes, enforceSchema guard</span><br>
+<a href="#note07">Note 07 — Correction: Bronze Stores Text, Not Types</a> · <span style="font-size:0.9em;color:var(--muted)">supersedes Note 03's typed schema</span><br>
+<a href="#note08">Note 08 — Idempotency: Breaking Append, Choosing replaceWhere</a> · <span style="font-size:0.9em;color:var(--muted)">the triple-load, batch vs UPSERT, how replaceWhere works</span><br>
+<strong>Understanding the data</strong><br>
+<a href="#note09">Note 09 — Profiling Results &amp; What Fraud Actually Means</a> · <span style="font-size:0.9em;color:var(--muted)">eight findings, SQL patterns, fraud definitions in real banks</span><br>
+<a href="#note10">Note 10 — Silver Design Specification</a> · <span style="font-size:0.9em;color:var(--muted)">every column, every derived rule, and where each came from</span>
+</div>
+
+<!-- ============================================================ NOTE 01 -->
+<div class="note-header" id="note01">Note 01 — Project Skeleton &amp; the Databricks CLI <span class="note-date">· July 2026</span></div>
+
+<h2>1. What we're building (30-second recap)</h2>
+<p>A fraud-detection data pipeline on Databricks Free Edition using the <strong>medallion architecture</strong>: raw transaction data lands in <strong>bronze</strong>, gets cleaned and validated into <strong>silver</strong>, and is aggregated into <strong>gold</strong> tables that feed an ML fraud model. Everything is stored as Delta tables, versioned in GitHub, and deployed with Databricks Asset Bundles.</p>
+
+<h2>2. The project skeleton — what each file is and why it exists</h2>
+
+<div class="card">
+<p><strong>The core idea:</strong> treat the pipeline like a real software project from day one, not a pile of notebooks. Code lives in git, logic is testable, deployment is repeatable, and nothing is clicked together by hand in the Databricks UI. This is exactly what employers mean by "data engineering best practices."</p>
+</div>
+
+<pre class="tree">databricks-finance-data-pipeline/
+├── CLAUDE.md                  ← project context/instructions for AI assistants
+├── README.md                  ← human-facing project description
+├── databricks.yml             ← Asset Bundle config (the deployment "recipe")
+├── pyproject.toml             ← Python project config (lint + test settings)
+├── .gitignore                 ← keeps secrets & junk out of the public repo
+├── .github/workflows/ci.yml   ← GitHub Actions: auto lint + test on push
+├── src/                       ← reusable Python transform functions
+├── pipelines/                 ← pipeline & job definitions (the "what runs")
+├── resources/                 ← bundle YAML for jobs/pipelines (the "how it runs")
+└── tests/                     ← pytest unit tests for src/ code</pre>
+
+<h3>File-by-file thought process</h3>
+<table>
+<tr><th>File / folder</th><th>Why it exists</th></tr>
+<tr><td><code>databricks.yml</code></td><td><span class="why">Deployment as code.</span> Defines the "bundle" — a package of jobs, pipelines, and code that can be deployed to any workspace with one command. Ours points at the <code>free</code> auth profile and a <code>dev</code> target. No manual clicking in the UI = reproducible, reviewable deployments.</td></tr>
+<tr><td><code>src/</code></td><td><span class="why">Testable logic.</span> Transformations (e.g. "flag transactions over $10k from a new device") are plain Python functions here — importable by both notebooks and tests. If logic lived only inside notebooks, you couldn't unit-test it.</td></tr>
+<tr><td><code>tests/</code></td><td><span class="why">Trust.</span> Pytest tests prove transforms work before they ever touch real data. Currently one placeholder test so CI has something to run.</td></tr>
+<tr><td><code>pipelines/</code> &amp; <code>resources/</code></td><td><span class="why">Separation of concerns.</span> <code>pipelines/</code> holds pipeline source (what transformations run); <code>resources/*.yml</code> holds bundle definitions (schedules, targets, settings). <code>databricks.yml</code> auto-includes everything in <code>resources/</code>.</td></tr>
+<tr><td><code>.github/workflows/ci.yml</code></td><td><span class="why">Safety net.</span> Every push runs <code>ruff</code> (linter — catches sloppy code) and <code>pytest</code> automatically on GitHub's servers. A green check means the repo is always in a known-good state.</td></tr>
+<tr><td><code>pyproject.toml</code></td><td><span class="why">One config to rule them all.</span> Declares the project name, Python version, and settings for ruff and pytest — so tools behave identically on your laptop and in CI.</td></tr>
+<tr><td><code>.gitignore</code></td><td><span class="why">Secret hygiene.</span> The repo is public. This blocks <code>.databrickscfg</code> (your auth tokens), virtualenvs, and caches from ever being committed.</td></tr>
+<tr><td><code>CLAUDE.md</code></td><td><span class="why">Context file.</span> Captures architecture and conventions so any AI assistant (or human) picks up the project with full context.</td></tr>
+</table>
+
+<h2>3. Why we installed the Databricks CLI</h2>
+
+<div class="card">
+<p><strong>In one sentence:</strong> the CLI is the bridge between your laptop/GitHub repo and the Databricks workspace in the cloud — it's how code gets from VS Code into Databricks without copy-pasting into notebooks.</p>
+</div>
+
+<h3>What we'll use it for</h3>
+<table>
+<tr><th>Command</th><th>What it does</th><th>When</th></tr>
+<tr><td><code>databricks auth login</code></td><td>Authenticates via browser (OAuth) and saves the connection as the <code>free</code> profile in <code>~/.databrickscfg</code>. No tokens pasted into files.</td><td>Once (done ✓)</td></tr>
+<tr><td><code>databricks bundle validate</code></td><td>Checks <code>databricks.yml</code> + <code>resources/</code> for errors and confirms the workspace connection works.</td><td>Before every deploy</td></tr>
+<tr><td><code>databricks bundle deploy</code></td><td>Uploads your code and creates/updates the jobs &amp; pipelines defined in the bundle. The workhorse command.</td><td>Every time code changes</td></tr>
+<tr><td><code>databricks bundle run</code></td><td>Triggers a job/pipeline from the terminal and streams status back.</td><td>Testing runs</td></tr>
+</table>
+
+<p>The development loop this enables: <strong>edit in VS Code → commit to git → <code>bundle deploy</code> → <code>bundle run</code> → check results</strong>. Later, CI can even run <code>bundle deploy</code> automatically — that's real CI/CD for data pipelines.</p>
+
+<!-- ============================================================ NOTE 02 -->
+<div class="note-header" id="note02">Note 02 — Learning Roadmap <span class="note-date">· July 2026</span></div>
+
+<h2>Guiding principles</h2>
+<div class="card">
+<p><strong>1. Data model first, ML last.</strong> Bronze → silver → gold is the real project; the fraud model is the payoff chapter that proves the pipeline delivers something usable.</p>
+<p><strong>2. Medium data to build, big data to optimize.</strong> Start on ~1M rows so mistakes cost seconds; scale up only when it's time to feel (and fix) slow queries.</p>
+<p><strong>3. One new concept per phase.</strong> Formats, streaming, and optimization arrive one at a time — never overwhelming, always compounding.</p>
+<p><strong>4. Every phase ends the same way:</strong> commit + push, CI green, note appended to this file.</p>
+</div>
+
+<h2>Dataset decision</h2>
+<p><strong>PaySim</strong> (Kaggle) — ~6.3M simulated mobile-money transactions modeled on real financial logs. Chosen because its columns are human-readable (type, amount, sender, receiver, balances), it carries real fraud labels for the ML phase, and its <code>step</code> column (1 step = 1 hour of simulated time) lets us split one static file into hourly/daily arrivals — real data, but arriving like production data would.</p>
+<p>Rejected alternatives: IEEE-CIS and ULB Credit Card (PCA-anonymized columns — can't practice data modeling on meaningless features); Bank Account Fraud NeurIPS (restrictive license).</p>
+
+<h2>The five phases</h2>
+
+<div class="phase">
+<h3>Phase 1 — Base data model <span style="font-weight:normal">(batch · CSV · ~1M rows)</span></h3>
+<p>Slice PaySim into daily CSV batches in a landing volume. Build the full medallion: bronze ingestion, silver cleaning transforms as tested Python functions in <code>src/</code>, quality expectations with quarantine (bad rows kept, not dropped), gold aggregates.</p>
+<p><strong>Ingestion is learned by hand first — a ladder where each rung solves the previous rung's problem:</strong></p>
+<table>
+<tr><th>Rung</th><th>Method</th><th>The lesson</th></tr>
+<tr><td>1</td><td>Plain <code>spark.read</code> + append</td><td>Run it twice → duplicates. Ingestion has no memory of what's been processed.</td></tr>
+<tr><td>2</td><td>Hand-rolled incremental</td><td>Fix it yourself: a log table tracking processed files, ingest only new ones, <code>MERGE</code> for idempotent writes. This is the core logic Auto Loader automates — checkpointing, exactly-once, dedup — built by hand.</td></tr>
+<tr><td>3</td><td><code>COPY INTO</code></td><td>Databricks' built-in SQL command that does the file tracking for you. Recognizable, because you just built it.</td></tr>
+<tr><td>4</td><td>Auto Loader <em>(deferred to Phase 3)</em></td><td>Adds schema evolution and scales to millions of files. Not magic by then — just a better version of your rung-2 code.</td></tr>
+</table>
+<p class="learn"><strong>You learn:</strong> Delta tables, medallion architecture, Unity Catalog volumes, idempotent ingestion logic, Lakeflow expectations, the edit → deploy → run loop.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 2 — File formats <span style="font-weight:normal">(JSON + Parquet join CSV)</span></h3>
+<p>Pretend three source systems deliver differently: one sends CSV, one JSON, one Parquet. Convert further PaySim slices and extend bronze to ingest all three into the same tables. Pipeline logic barely changes — that's the lesson.</p>
+<p class="learn"><strong>You learn:</strong> schema handling per format, schema evolution, why Parquet is the columnar favorite.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 3 — Streaming <span style="font-weight:normal">(Auto Loader + AvailableNow)</span></h3>
+<p>Same tables, new arrival mode. A drip-feed script drops files continuously; Auto Loader (rung 4 of the ingestion ladder) picks them up incrementally with exactly-once guarantees. A file-arrival trigger fires the job automatically when data lands.</p>
+<p class="learn"><strong>You learn:</strong> Structured Streaming, checkpoints, triggers, Auto Loader — and that batch vs streaming is almost the same code in Databricks.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 4 — Scale &amp; optimization <span style="font-weight:normal">(full 6.3M rows +)</span></h3>
+<p>Load everything (and synthetically multiply if needed). Measure slow queries, then fix them: liquid clustering / partitioning, <code>OPTIMIZE</code>, incremental <code>MERGE</code> instead of full rewrites.</p>
+<p class="learn"><strong>You learn:</strong> Delta performance tuning, file compaction, incremental upserts — with data big enough to feel the difference.</p>
+</div>
+
+<div class="phase">
+<h3>Phase 5 — ML &amp; automation <span style="font-weight:normal">(MLflow fraud model)</span></h3>
+<p>Train the fraud model on gold-layer features, track experiments with MLflow, and automate data-quality monitoring. The smallest phase — the gold features are what made it possible.</p>
+<p class="learn"><strong>You learn:</strong> MLflow tracking, feature engineering from gold tables, quality automation.</p>
+</div>
+
+<h2>Platform decisions (and why)</h2>
+<table>
+<tr><th>Decision</th><th>Reasoning</th></tr>
+<tr><td>Databricks <strong>Free Edition</strong>, not the Azure 14-day trial</td><td>No clock, no cost. The Azure trial gives free DBUs but VMs still bill against the $50 credit — it would evaporate in days and pressure a rushed pace.</td></tr>
+<tr><td>Auto Loader is fine on Free Edition</td><td>It's a built-in feature (<code>cloudFiles</code>), not a paid add-on. Serverless supports it with <code>Trigger.AvailableNow()</code>: wake → process everything new since last checkpoint → shut down. Paired with file-arrival triggers, that's real streaming architecture at zero cost.</td></tr>
+<tr><td>Always-on continuous streaming: skipped</td><td>Would burn Free Edition quotas; cost-conscious real teams use AvailableNow + triggers anyway.</td></tr>
+<tr><td>$50 Azure credit: reserved</td><td>Optional later phase — land raw files in ADLS (pennies) so the project legitimately touches Azure without burning credit on compute.</td></tr>
+</table>
+
+<h2>Where we are</h2>
+<table>
+<tr><th>Milestone</th><th>Status</th></tr>
+<tr><td>Repo + skeleton + CI pushed to GitHub</td><td class="done">✔ done</td></tr>
+<tr><td>Free Edition workspace + CLI auth (profile <code>free</code>)</td><td class="done">✔ done</td></tr>
+<tr><td><code>databricks bundle validate</code> passes</td><td>⬜ confirm</td></tr>
+<tr><td>Phase 1: PaySim download + daily slicer script</td><td>⬜ next up</td></tr>
+</table>
+
+<!-- ============================================================ NOTE 03 -->
+<div class="note-header" id="note03">Note 03 — Knowing the Data: Source Interview &amp; Bronze Design <span class="note-date">· July 2026</span></div>
+
+<h2>The dataset, in plain words</h2>
+<p>PaySim simulates a <strong>mobile money service</strong> (like M-Pesa or a Paytm wallet): your phone number is your wallet. 6.36M rows over 31 simulated days; one row = one money movement. The five types: <code>CASH_IN</code> (deposit), <code>CASH_OUT</code> (withdraw), <code>PAYMENT</code> (pay a merchant), <code>TRANSFER</code> (send to a customer), <code>DEBIT</code> (send to a bank).</p>
+<p><strong>The <code>step</code> column is the only timestamp:</strong> hours since simulation start (1–744). <code>step=50</code> = day 3, ~2am. Day = <code>(step-1)//24 + 1</code>. No minutes, no seconds — a real limitation of this source.</p>
+
+<h2>The fraud pattern (why single rows can't reveal it)</h2>
+<p>A fraudster hijacks an account, transfers the <strong>entire balance</strong> (amount = old balance, new balance = 0.0) to a mule account, which cashes out within the hour. Each transaction alone looks innocent — millions of people do transfer → cash-out daily. The fraud is only visible in <em>context</em>: amount vs balance ratio, paired transactions, speed. <strong>That context is what the gold layer exists to compute.</strong> The bank's old rule (<code>isFlaggedFraud</code>, flags only transfers &gt; 200k) catches almost nothing — which is why this project exists.</p>
+
+<h2>Source system interview (Fundamentals of DE, generation stage)</h2>
+<table>
+<tr><th>Question</th><th>Our answer</th><th>Design consequence</th></tr>
+<tr><td>Source characteristics?</td><td>Behaves like an application DB export delivered as daily CSV file drops.</td><td>File-based, batch-first ingestion.</td></tr>
+<tr><td>Snapshot or event data?</td><td>Event (one row per transaction) — with snapshot-ish balance fields smuggled in.</td><td>Append-only ingestion: new events only, never updates to old rows.</td></tr>
+<tr><td>Rate of generation?</td><td>~205k rows/day average, but wildly uneven: 574k on day 1, 272 on day 31.</td><td>Size and test for peak days, not average. Test ingestion with day 1.</td></tr>
+<tr><td>Persistence — can landing files be deleted?</td><td>Once bronze holds a faithful as-is copy, <strong>bronze becomes source of truth</strong>; landing gets a retention window (7–30 days) then expires.</td><td>This is <em>why</em> bronze stores data untouched. Needing landing after ingestion = you don't trust bronze = bronze was built wrong.</td></tr>
+<tr><td>Provider data quality?</td><td>(1) Balance columns often don't reconcile (e.g. receivers showing 0.0 after receiving money). (2) <code>isFlaggedFraud</code> is nearly useless.</td><td>(1) becomes silver cleaning rules. (2) motivates the whole gold/ML build.</td></tr>
+<tr><td>Are the fraud labels trustworthy?</td><td>In real banks, labels arrive weeks late and incomplete (undetected fraud stays 0). PaySim's <code>isFraud</code> is simulation ground truth — perfect.</td><td>A luxury unique to synthetic data. Note as a known unrealism of the project.</td></tr>
+</table>
+
+<h2>Key concept learned: grain</h2>
+<p><strong>Grain = what one row represents.</strong> Declaring "row = customer" then listing transaction-level fields (amount, balance before/after) mixes grains — the classic data modeling mistake. At customer grain, every field must be an <em>aggregation</em>: counts, sums, maxes, ratios ("max % of balance moved in one transaction today"). Rule of thumb: <em>design backwards (gold's grain comes from the consumer's questions), build forwards (bronze → silver → gold).</em></p>
+
+<h2>Bronze design (decided)</h2>
+<table>
+<tr><th>Property</th><th>Decision</th><th>Why</th></tr>
+<tr><td>Grain</td><td>One row per source row</td><td>Bronze = the source, archived. No fixes, no filters, no renames — mistakes made here are permanent, so nothing is "improved" on the way in.</td></tr>
+<tr><td>Columns</td><td>All 11 PaySim columns, as-is</td><td>Bronze is the time machine: if silver's cleaning logic has a bug in month 3, rebuild silver from untouched bronze.</td></tr>
+<tr><td>+ <code>source_file</code></td><td>Which landing file the row came from</td><td>Landing files are disposable → each row must remember its origin for tracing.</td></tr>
+<tr><td>+ <code>ingest_timestamp</code></td><td>When we loaded the row</td><td>Debugging slow/failed loads on peak days.</td></tr>
+<tr><td>+ <code>batch_date</code></td><td>Which daily batch it belongs to</td><td>Files arrive per-day; lets us reprocess exactly one day.</td></tr>
+</table>
+<p>Every audit column exists because of a source-interview answer. <strong>Nothing in a pipeline is arbitrary: source facts → design decisions.</strong></p>
+
+<h2>Bronze schema — <span class="why">SUPERSEDED, see Note 07</span>: <code>workspace.bronze.transactions</code></h2>
+<div class="card"><p><span class="why">Revised in Note 07.</span> The column types below (DOUBLE / INT) were replaced with all-STRING. Casting values while reading is itself a transformation, which contradicts the "no fixes" rule stated in the same note — and a value that fails to parse is silently lost. The column <em>names</em> and <em>order</em> below still stand.</p></div>
+<table>
+<tr><th>Column</th><th>Type</th><th>Notes</th></tr>
+<tr><td><code>step</code></td><td>INT</td><td>Hours since sim start (1–744). Only time signal we get.</td></tr>
+<tr><td><code>type</code></td><td>STRING</td><td>CASH_IN / CASH_OUT / PAYMENT / TRANSFER / DEBIT</td></tr>
+<tr><td><code>amount</code></td><td>DOUBLE</td><td></td></tr>
+<tr><td><code>nameOrig</code></td><td>STRING</td><td>Sender account (C… = customer)</td></tr>
+<tr><td><code>oldbalanceOrg</code></td><td>DOUBLE</td><td>Source's ugly inconsistent name — kept! Renaming is silver's job.</td></tr>
+<tr><td><code>newbalanceOrig</code></td><td>DOUBLE</td><td></td></tr>
+<tr><td><code>nameDest</code></td><td>STRING</td><td>Receiver (C… = customer, M… = merchant)</td></tr>
+<tr><td><code>oldbalanceDest</code></td><td>DOUBLE</td><td></td></tr>
+<tr><td><code>newbalanceDest</code></td><td>DOUBLE</td><td></td></tr>
+<tr><td><code>isFraud</code></td><td>INT</td><td>Ground-truth label (simulation luxury)</td></tr>
+<tr><td><code>isFlaggedFraud</code></td><td>INT</td><td>Old rule engine's output (nearly useless)</td></tr>
+<tr><td><code>source_file</code></td><td>STRING</td><td>Audit: which landing file</td></tr>
+<tr><td><code>ingest_timestamp</code></td><td>TIMESTAMP</td><td>Audit: when loaded</td></tr>
+<tr><td><code>batch_date</code></td><td>DATE</td><td>Audit: which daily batch; enables per-day reprocessing</td></tr>
+</table>
+<p>Rules: <strong>explicit schema at read, never <code>inferSchema</code></strong> (inference can silently change types between files); append-only; idempotent per <code>batch_date</code>.</p>
+
+<h2>Storage conventions</h2>
+<table>
+<tr><th>Thing</th><th>Convention</th></tr>
+<tr><td>Catalog</td><td><code>workspace</code> (Free Edition default)</td></tr>
+<tr><td>Schemas</td><td><code>bronze</code>, <code>silver</code>, <code>gold</code>, <code>ops</code> (ingest logs + quarantine)</td></tr>
+<tr><td>Table names</td><td>lowercase snake_case; layer expressed by schema: <code>workspace.bronze.transactions</code></td></tr>
+<tr><td>Landing volume</td><td><code>/Volumes/workspace/bronze/landing/date=YYYY-MM-DD/transactions.csv</code></td></tr>
+<tr><td>Landing retention</td><td>Disposable 30 days after ingestion — bronze is the source of truth</td></tr>
+<tr><td>Table format</td><td>Managed Delta tables, everywhere</td></tr>
+</table>
+
+<h2>Data profiling checklist (run on bronze → becomes silver's design)</h2>
+<p>Each check produces evidence; each piece of evidence becomes (or kills) a silver cleaning rule. Predictions written before running — part of the learning.</p>
+<table>
+<tr><th>#</th><th>Profiling question</th><th>Possible silver rule it feeds</th></tr>
+<tr><td>1</td><td>Row count per <code>batch_date</code> vs landing file line counts — did we lose rows?</td><td>Completeness check in ingest log</td></tr>
+<tr><td>2</td><td>Exact duplicate rows? Near-duplicates (same sender, step, amount, receiver)?</td><td>Dedup rule + defining a transaction business key</td></tr>
+<tr><td>3</td><td>Rows with <code>amount &lt;= 0</code>?</td><td>Expectation: amount must be positive → quarantine</td></tr>
+<tr><td>4</td><td>Balance math: how often does <code>oldbalanceOrg − amount ≠ newbalanceOrig</code>? Broken down by type?</td><td>Reconciliation flag column (keep row, mark it) — expected to fail often; known source wart</td></tr>
+<tr><td>5</td><td>Nulls / empty strings per column?</td><td>Not-null expectations on key columns</td></tr>
+<tr><td>6</td><td>Distinct values of <code>type</code> — exactly the 5 expected?</td><td>Allowed-values expectation</td></tr>
+<tr><td>7</td><td><code>step</code> range: all within 1–744? Integers only?</td><td>Range expectation; drives event_time derivation</td></tr>
+<tr><td>8</td><td><code>isFraud</code> distribution by type — really only in TRANSFER &amp; CASH_OUT?</td><td>Documentation for gold/ML; sanity check</td></tr>
+<tr><td>9</td><td>Merchant (M…) receiver balances — always 0.0?</td><td>Documented source quirk; maybe merchant flag column in silver</td></tr>
+<tr><td>10</td><td>Mule pairs: TRANSFER and CASH_OUT with same amount in same step?</td><td>Gold feature candidate (paired-transaction detection)</td></tr>
+</table>
+
+<!-- ============================================================ NOTE 04 -->
+<div class="note-header" id="note04">Note 04 — Notebook Structure &amp; the <code style="background:none;color:#fff">%run</code> Path Error <span class="note-date">· July 2026</span></div>
+
+<h2>The decision: one place for configuration</h2>
+
+<div class="card">
+<p><strong>The idea:</strong> the landing volume path is a value that will change — a different catalog, a different workspace, an eventual Azure deployment. Written into every notebook, that change becomes a search-and-replace across the project. Written once in a helper notebook, it becomes a one-line edit.</p>
+</div>
+
+<p>Notebooks in the Databricks workspace were therefore organised into folders rather than left flat:</p>
+
+<pre class="tree">Project-financial-pipeline/
+├── 00_helpers/
+│   └── config                    ← landing volume path, catalog/schema names
+└── 01_bronze/
+    └── 01_ingest_transactions    ← consumes config via %run</pre>
+
+<p>The bronze ingest notebook pulls the shared values in with <code>%run</code>, which executes another notebook in the <em>current</em> notebook's session — so any variable defined in <code>config</code> is available afterwards, exactly as if it had been typed at the top of the cell.</p>
+
+<h2>The error</h2>
+
+<p>The first attempt failed before a single line of Spark ran:</p>
+
+<pre><code>%run ../00. helpers/01.environment-config</code></pre>
+
+<pre><code>Failed to parse %run command: string matching regex '\$[\w_]+' expected
+but 'h' found. If notebook path or value contains spaces, wrap with
+double quotes.</code></pre>
+
+<h3>Root cause</h3>
+<p>The folder was named <code>00. helpers</code> — with a <strong>space</strong> after the dot. <code>%run</code> is a <em>magic command</em>, not Python: it parses its argument as a single bare token and treats whitespace as the end of that token. Parsing stopped at the space, and the remaining <code>helpers/...</code> was read as an unexpected second argument — hence the complaint about the character <code>'h'</code>.</p>
+
+<h2>Two fixes, and why only one of them counts</h2>
+
+<table>
+<tr><th>Fix</th><th>Verdict</th></tr>
+<tr><td><code>%run "../00. helpers/01.environment-config"</code><br>(wrap the path in quotes)</td><td><span class="why">Band-aid.</span> Works, but fixes exactly one call site and leaves the underlying naming problem in place.</td></tr>
+<tr><td>Rename folders and notebooks to remove spaces, dots and hyphens</td><td><span class="why">Adopted.</span> Removes the whole class of failure, not this one instance.</td></tr>
+</table>
+
+<h3>Why renaming was worth the churn</h3>
+<table>
+<tr><th>Character</th><th>What it breaks</th></tr>
+<tr><td>Space</td><td>Resurfaces in Asset Bundle YAML, Databricks CLI arguments, job task definitions, and git on Windows. Quoting solves it once; renaming solves it everywhere.</td></tr>
+<tr><td>Dot</td><td>Blocks any future <code>import</code>. Shared code consumed today via <code>%run</code> is better imported as a Python module once the project moves to Asset Bundles — and Python reads a dot as a package separator, so <code>01.environment-config</code> could never be imported.</td></tr>
+<tr><td>Hyphen</td><td>Invalid in Python identifiers, for the same reason.</td></tr>
+<tr><td>Leading digits <em>(kept)</em></td><td>Harmless in folder names and they preserve execution order when the workspace lists folders alphabetically — <code>00_helpers</code> before <code>01_bronze</code>.</td></tr>
+</table>
+
+<p><strong>Convention adopted:</strong> underscores only. No spaces, no dots except genuine file extensions, no hyphens.</p>
+
+<h2>Design note carried forward</h2>
+
+<div class="card">
+<p>The config notebook currently hardcodes <code>/Volumes/workspace/bronze/landing/</code>. That literal will not survive deployment to an Azure Databricks workspace, where the catalog and volume differ.</p>
+<p>The eventual fix is to supply it as an <strong>Asset Bundle variable resolved per target</strong>, so <code>dev</code> and <code>azure</code> bind different values without editing a single notebook. Not built yet — the discipline for now is simply that the literal path appears in <code>00_helpers/config</code> and <strong>nowhere else</strong>, which keeps that swap cheap when it comes.</p>
+</div>
+
+<p class="learn"><strong>You learn:</strong> <code>%run</code> as Databricks' notebook-composition mechanism, magic commands vs Python syntax, and why naming hygiene is an engineering decision rather than a cosmetic one.</p>
+
+<!-- ============================================================ NOTE 05 -->
+<div class="note-header" id="note05">Note 05 — First Read: Everything Is a String <span class="note-date">· July 2026</span></div>
+
+<h2>What we did</h2>
+<p>Read the day-1 landing file with the plainest possible Spark read — no schema, no options beyond <code>header</code> — specifically <em>in order to watch it fail</em>. The bronze contract already says "explicit schema at read, never <code>inferSchema</code>." This note is the evidence behind that rule, gathered first-hand rather than taken on trust.</p>
+
+<pre><code>df = (
+    spark.read
+    .format("csv")
+    .option("header", "true")
+    .load(source_file)
+)</code></pre>
+
+<div class="card">
+<p><strong>Two bugs on the way in, both worth recording:</strong></p>
+<p><strong>1. <code>spark.read()</code> → <code>spark.read</code>.</strong> <code>read</code> is a <em>property</em> returning a <code>DataFrameReader</code>, not a method. Adding parentheses tries to call the reader object itself.</p>
+<p><strong>2. Double slash in the path.</strong> <code>landing_folder_path</code> ended with <code>/</code> and the f-string added another, producing <code>…/date=2026-06-01//transactions.csv</code>. Spark tolerates it, but the value lands verbatim in the <code>source_file</code> audit column later. <span class="why">Convention fixed:</span> the config stores paths <em>without</em> a trailing slash; consumers add the separator.</p>
+</div>
+
+<h2>Result 1 — the row count is correct</h2>
+<table>
+<tr><th>Check</th><th>Expected</th><th>Actual</th></tr>
+<tr><td>Day-1 row count (from Note 03 source interview)</td><td>574,255</td><td class="done">574,255 ✔</td></tr>
+</table>
+<p>The file arrived whole. Nothing truncated during upload to the volume — worth confirming before blaming anything downstream.</p>
+
+<h2>Result 2 — every column came back as <code>string</code></h2>
+<pre><code>root
+ |-- step: string (nullable = true)
+ |-- type: string (nullable = true)
+ |-- amount: string (nullable = true)
+ |-- nameOrig: string (nullable = true)
+ |-- oldbalanceOrg: string (nullable = true)
+ |-- newbalanceOrig: string (nullable = true)
+ |-- nameDest: string (nullable = true)
+ |-- oldbalanceDest: string (nullable = true)
+ |-- newbalanceDest: string (nullable = true)
+ |-- isFraud: string (nullable = true)
+ |-- isFlaggedFraud: string (nullable = true)</code></pre>
+
+<p>All eleven — including <code>amount</code>, the four balance columns, <code>step</code> and both fraud flags.</p>
+
+<h3>Why</h3>
+<p><strong>A CSV file contains no type information.</strong> It is characters and commas, nothing more. <code>header=true</code> only instructs Spark to take column <em>names</em> from row 1 — it says nothing about types. Given no other instruction, Spark takes the only safe option available and calls everything a string. Values that <em>look</em> numeric are still text: how a value looks is not what it is.</p>
+
+<h2>Why this is fatal for <code>amount</code></h2>
+
+<p>Text is compared <strong>one character at a time, left to right; the first difference decides and length is never considered</strong> — dictionary order. <code>"Zebra"</code> beats <code>"Apple"</code> because Z beats A; nobody counts the letters.</p>
+
+<table>
+<tr><th>Same four values</th><th>Sorted as text (what we had)</th><th>Sorted as number (what we meant)</th></tr>
+<tr><td rowspan="4" style="vertical-align:middle"><code>9.99</code><br><code>85.00</code><br><code>700.00</code><br><code>1000000.00</code></td><td><code>9.99</code> &nbsp;<span class="why">← "max"</span></td><td><code>1000000.00</code> &nbsp;← max</td></tr>
+<tr><td><code>85.00</code></td><td><code>700.00</code></td></tr>
+<tr><td><code>700.00</code></td><td><code>85.00</code></td></tr>
+<tr><td><code>1000000.00</code></td><td><code>9.99</code></td></tr>
+</table>
+
+<p><code>9.99</code> outranks <code>1000000.00</code> because <code>9</code> beats <code>1</code> at the first character and the comparison ends there.</p>
+
+<p>This is harmless for <code>nameOrig</code> / <code>nameDest</code> — account IDs are genuinely text and no arithmetic is ever done on them. It is ruinous for <code>amount</code> and the balance columns, because nearly every question about money is a <em>size</em> question: biggest transfers, threshold breaches, daily totals, "did this transaction empty the account".</p>
+
+<div class="card">
+<p><span class="why">The dangerous part:</span> none of this raises an error. <code>max()</code> and <code>ORDER BY</code> are both perfectly legal on a string column — they simply mean something other than intended. A "top 5 largest transactions" report returns five values beginning with <code>9</code>, runs green, and looks plausible on a dashboard. <strong>A query that runs clean and answers wrong is more dangerous than one that crashes, because nothing tells you to look.</strong></p>
+</div>
+
+<h3>Also why the fraud pattern would vanish</h3>
+<p>The core signal from Note 03 — "amount equals the entire old balance" — becomes a string equality test. <code>"181.0"</code> and <code>"181.00"</code> are the same number and different strings.</p>
+
+<h2>Proving it on our own data</h2>
+
+<pre><code>from pyspark.sql import functions as F
+
+df.agg(
+    F.max("amount"),                          # lexicographic max
+    F.max(F.col("amount").cast("double")),    # true numeric max
+).show()</code></pre>
+
+<p>Or in SQL, which puts both answers in one row:</p>
+
+<pre><code>df.createOrReplaceTempView("raw_txn")</code></pre>
+<pre><code>SELECT
+  max(amount)                 AS text_max,
+  max(cast(amount AS double)) AS real_max
+FROM raw_txn</code></pre>
+
+<h3>Aside: why a temp view was needed at all</h3>
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>Why can't SQL see <code>df</code>?</td><td><code>df</code> is a <em>Python variable</em> in the notebook process. A <code>%sql</code> cell goes to Spark's SQL engine, which resolves names against a <strong>catalog</strong> — it has never heard of a Python variable. <code>createOrReplaceTempView</code> registers a catalog name pointing at the dataframe: the bridge between the two namespaces.</td></tr>
+<tr><td>Does it copy data?</td><td>No. It attaches a name to the dataframe's <em>logical plan</em> — the recipe. Querying the view re-runs the recipe (re-reading the CSV). Free to create, does no work until queried.</td></tr>
+<tr><td>Does it belong in the data model?</td><td>No. Session-scoped, vanishes when the notebook detaches, invisible in Unity Catalog. A scratch alias, not an object. Nothing about it belongs in bronze.</td></tr>
+<tr><td>Why not query the file directly with <code>read_files()</code>?</td><td><span class="why">It would have hidden the bug.</span> <code>read_files</code> infers the schema by default, so <code>amount</code> would arrive as a double and the experiment would show nothing. The temp view was correct here precisely <em>because</em> it preserves the all-strings dataframe exactly as Spark built it.</td></tr>
+</table>
+
+<h2>The trap that makes it worse: inconsistent coercion</h2>
+<table>
+<tr><th>Operation on the string column</th><th>What Spark does</th><th>Result</th></tr>
+<tr><td><code>WHERE amount &gt; 200000</code></td><td>String column vs numeric literal — Spark quietly casts the column to double</td><td class="done">Correct answer</td></tr>
+<tr><td><code>ORDER BY amount DESC</code></td><td>No numeric literal involved — stays a string comparison</td><td><span class="why">Wrong answer, silently</span></td></tr>
+<tr><td><code>max(amount)</code></td><td>Lexicographic maximum</td><td><span class="why">Wrong answer, silently</span></td></tr>
+</table>
+<p>Some operations coerce, others don't, and <strong>the query text gives no clue which</strong>. That inconsistency — not any single wrong result — is the real argument for fixing the type once at read time instead of casting defensively at every use site.</p>
+
+<h2>Why <code>inferSchema</code> is not the fix</h2>
+<table>
+<tr><th>Problem</th><th>Consequence</th></tr>
+<tr><td>Costs an extra full pass over the data</td><td>Spark reads the whole file once to guess, then again to load. Tolerable at 42 MB; not at 42 GB.</td></tr>
+<tr><td>The guess depends on the rows it happened to see</td><td><span class="why">Schema drift between batches.</span> Day 1 may infer <code>amount</code> as double; a later day where every value is whole may infer long. Bronze's schema then changes between loads and downstream breaks for reasons unrelated to any code change.</td></tr>
+</table>
+<div class="card">
+<p><strong>A schema you declare is a contract you enforce. A schema Spark guesses is a coincidence.</strong> This is the reasoning behind the bronze contract rule — now confirmed by observation rather than assumed.</p>
+</div>
+
+<h2>How to avoid this in future</h2>
+<table>
+<tr><th>#</th><th>Practice</th><th>Why</th></tr>
+<tr><td>1</td><td>Declare an explicit <code>StructType</code> for every schemaless source (CSV, JSON). Never the default, never <code>inferSchema</code>.</td><td>Types become a decision on the record, not a by-product of whichever rows arrived.</td></tr>
+<tr><td>2</td><td>Define each schema <strong>once</strong> in <code>src/</code> and import it into notebooks and tests alike.</td><td>One definition can be asserted against; a schema copy-pasted into three notebooks silently diverges.</td></tr>
+<tr><td>3</td><td><span class="why">Assert the schema in code, don't eyeball it.</span> A pytest check comparing the read schema to the declared contract turns "the source changed its columns" into a red CI run instead of a silent wrong number weeks later.</td><td>This is the durable fix. Everything else depends on someone remembering to look.</td></tr>
+<tr><td>4</td><td>Make <code>printSchema()</code> the first thing run after <em>any</em> new read — treat it as part of ingestion, not curiosity.</td><td>Costs seconds; catches the entire class of problem at the only moment it is cheap to fix.</td></tr>
+<tr><td>5</td><td>For any column intended as numeric, sanity-check once with <code>max(col)</code> vs <code>max(cast(col AS double))</code>.</td><td>A two-second query that distinguishes "typed correctly" from "looks fine, sorts wrong".</td></tr>
+<tr><td>6</td><td>Never read "the query returned rows" as "the query returned the right rows".</td><td>Type bugs in SQL surface as plausible output, never as errors.</td></tr>
+<tr><td>7</td><td>If using <code>read_files()</code> or <code>COPY INTO</code> later, pass explicit schema hints rather than accepting inference.</td><td>Convenience functions default to guessing — the same trap wearing a nicer API.</td></tr>
+</table>
+
+<h2>Open question (unresolved)</h2>
+<div class="card">
+<p>The bronze schema in Note 03 declares <code>amount</code> as <code>DOUBLE</code>. Double is binary floating point — <code>0.1 + 0.2 ≠ 0.3</code> — and financial systems conventionally store money as <code>DECIMAL</code>.</p>
+<p><strong>To decide:</strong> does bronze keep <code>DOUBLE</code> on the grounds that bronze mirrors the source as-is and PaySim's CSV is float-native, deferring <code>DECIMAL</code> to silver where reshaping is allowed? Or is a money column typed as <code>DOUBLE</code> a defect worth correcting at the boundary? <em>Answer to be recorded here once reasoned through.</em></p>
+</div>
+
+<p class="learn"><strong>You learn:</strong> why schemaless formats default to strings, how lexicographic comparison silently corrupts numeric logic, Spark's inconsistent type coercion, the real cost of <code>inferSchema</code>, temp views as the Python↔SQL bridge, and schema assertion as the engineering answer to all of it.</p>
+
+<!-- ============================================================ NOTE 06 -->
+<div class="note-header" id="note06">Note 06 — When the Source Changes: Schema Evolution <span class="note-date">· July 2026</span></div>
+
+<h2>The question</h2>
+<p>Note 05 settled <em>why</em> bronze declares an explicit schema. The obvious follow-up: what happens months from now when the source file itself changes shape?</p>
+
+<div class="card">
+<p><strong>The answer that reframes it:</strong> an explicit schema does not stop the source from changing — nothing can, the file belongs to someone else. What it provides is a <em>fixed expectation for reality to contradict</em>. With <code>inferSchema</code> there is no expectation at all, so a change quietly becomes the new normal. With a declared schema, a change is a contradiction — and a contradiction can be caught.</p>
+<p class="why">A declared schema doesn't stop change. It makes change fail loudly instead of quietly.</p>
+</div>
+
+<h2>Mental model</h2>
+<p>A <code>StructType</code> is a form with 11 labelled boxes. A CSV row is a line of values. Spark pours the values into the boxes <strong>in order</strong> — and by default <strong>does not read the file's header to check the names</strong>. If the source changes shape, the values still land in boxes; they just land in the wrong ones. The form comes out looking perfectly filled in.</p>
+
+<h2>Three ways a source can change — behaviour with an explicit schema</h2>
+<table>
+<tr><th>The source…</th><th>Spark does…</th><th>You get…</th></tr>
+<tr><td>Adds a 12th column</td><td>Reads only the 11 declared</td><td><span class="why">The new column is thrown away.</span> No error, no warning — arguably the worst case, because everything looks healthy while data is lost.</td></tr>
+<tr><td>Swaps / reorders two columns</td><td>Fills the slots by position; the file's header is ignored</td><td><span class="why">Values land in the wrong columns</span> — correctly typed, entirely plausible, completely wrong. Every downstream number is corrupt and nothing complains.</td></tr>
+<tr><td>Sends an unparseable value (<code>amount = "N/A"</code>)</td><td>Can't read it as a number; default <code>PERMISSIVE</code> mode</td><td>That value becomes <code>null</code>. No error. Indistinguishable from a genuine null.</td></tr>
+</table>
+<p><strong>The pattern in all three:</strong> Spark finishes happily and hands back a wrong answer.</p>
+
+<h3>Important — these are the <em>explicit schema</em> failure modes</h3>
+<p>Easy to misread these as arguments for <code>inferSchema</code>. They are not. They are the reason an explicit schema needs one additional option alongside it.</p>
+
+<h2>Honest comparison</h2>
+<table>
+<tr><th>Source change</th><th>With <code>inferSchema</code></th><th>With explicit schema</th></tr>
+<tr><td>Adds a column</td><td>Picked up automatically — but the bronze table's shape changes without anyone deciding</td><td>Dropped silently</td></tr>
+<tr><td>Swaps two columns</td><td class="done">Handled correctly — it reads the header for names</td><td><span class="why">Values land in the wrong boxes</span></td></tr>
+<tr><td>Sends <code>"N/A"</code> in <code>amount</code></td><td><span class="why">The whole column reverts to text</span> — the Note 05 bug returns, triggered by a single bad row</td><td>That one value becomes <code>null</code></td></tr>
+</table>
+<p><code>inferSchema</code> genuinely wins the middle row — worth stating plainly rather than pretending otherwise. But the cost is that <strong>the source is in charge of your types</strong>: the table restructures itself on row 1, and a single bad value among 574,255 rows silently breaks every calculation on row 3.</p>
+
+<h2>The fix</h2>
+<pre><code>df = (
+    spark.read
+    .format("csv")
+    .option("header", "true")
+    .option("enforceSchema", "false")   &lt;-- added
+    .schema(transactions_schema)
+    .load(source_file)
+)</code></pre>
+<table>
+<tr><th>Piece</th><th>What it buys</th></tr>
+<tr><td><code>.schema(...)</code></td><td>Types are a decision on the record, not a guess that can drift between batches.</td></tr>
+<tr><td><code>enforceSchema = false</code></td><td><span class="why">Closes the one gap where inference was ahead.</span> Spark validates the file's header names against the declared schema and <strong>fails</strong> on mismatch, converting silent column-swap corruption into an immediate, obvious error.</td></tr>
+</table>
+<p>Neither piece is sufficient alone: fixed types <em>and</em> a loud failure when the source moves.</p>
+
+<h2>When a change turns out to be real</h2>
+<table>
+<tr><th>Kind of change</th><th>How bronze absorbs it</th></tr>
+<tr><td>Additive (new column)</td><td>Add the field to the <code>StructType</code> and write with Delta <code>mergeSchema</code>. Historic rows carry <code>null</code> for the new column — which is <em>honest</em>: those rows genuinely never had that field.</td></tr>
+<tr><td>Type change</td><td>The painful case. Requires a deliberate rebuild rather than an in-place edit — <span class="why">which is precisely why bronze stores the source untouched.</span> Rebuilding downstream from an unmodified bronze is always possible; recovering data bronze never captured is not.</td></tr>
+</table>
+<p>Because bronze is append-only and stores raw source data, no schema change is ever a dead end.</p>
+
+<h2>Forward link — Auto Loader (Phase 3)</h2>
+<p>Auto Loader automates exactly this: <code>schemaEvolutionMode</code> decides what happens when new columns appear, and <code>rescuedDataColumn</code> captures anything unexpected <em>instead of discarding it</em> — directly fixing failure #1 above. Meeting these three failures by hand first is what makes Auto Loader legible later rather than magic.</p>
+
+<h2>Vocabulary clarified</h2>
+<table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td><strong>Coercion</strong></td><td>Spark silently converting a type on your behalf — e.g. seeing <code>amount &gt; 200000</code>, noticing a string against a number, and casting the column to double without asking or warning. The Note 05 trap.</td></tr>
+<tr><td><strong>Coalesce</strong></td><td>Unrelated, and confusingly two different things: <code>coalesce(a, b, c)</code> in SQL returns the first non-null value from a list; <code>df.coalesce(n)</code> in Python reduces the number of partitions. Same word, no relationship to coercion.</td></tr>
+</table>
+
+<p class="learn"><strong>You learn:</strong> that schema enforcement is positional by default, the three silent failure modes of a declared schema, the real trade-off against inference, <code>enforceSchema</code> as the missing guard, Delta <code>mergeSchema</code> for additive evolution, and why append-only raw bronze makes every schema change recoverable.</p>
+
+<!-- ============================================================ NOTE 07 -->
+<div class="note-header" id="note07">Note 07 — Correction: Bronze Stores Text, Not Types <span class="note-date">· July 2026</span></div>
+
+<h2>What changed</h2>
+<div class="card">
+<p><strong>Bronze now reads every column as STRING.</strong> The typed bronze schema from Note 03 (DOUBLE for money, INT for flags) is superseded.</p>
+<p class="why">One line to remember: bronze keeps, silver converts.</p>
+</div>
+
+<h2>Why — the contradiction in our own contract</h2>
+<p>The bronze contract says <strong>"no fixes, no filters, no renames."</strong> Casting <code>"9839.64"</code> into a double <em>is</em> a fix. The typed schema table sat three lines below the rule that forbade it.</p>
+
+<h3>The concrete failure</h3>
+<table>
+<tr><th>Step</th><th>What happens</th></tr>
+<tr><td>A row arrives with <code>amount = "N/A"</code></td><td>Source sends something unexpected — normal in production.</td></tr>
+<tr><td>Bronze schema says <code>DoubleType</code></td><td>Spark tries to parse it as a number and fails.</td></tr>
+<tr><td>Default <code>PERMISSIVE</code> mode</td><td>Writes <code>null</code>. No error, no warning.</td></tr>
+<tr><td class="why">The original text is gone</td><td><span class="why">It was never stored.</span> Bronze cannot be replayed to find out what the source actually sent.</td></tr>
+</table>
+<p>Note 03 calls bronze "the time machine — rebuild silver from untouched bronze if the cleaning logic has a bug in month 3." A bronze that silently nulls unparseable values is not a time machine. It has already made an irreversible decision at the door.</p>
+
+<h2>What the vendor guidance actually says</h2>
+<p>Databricks recommends <strong>minimal validation in bronze</strong>, and — to protect against dropped data — storing most fields as <code>STRING</code>, <code>VARIANT</code>, or <code>BINARY</code>. Schema <em>enforcement</em> belongs to silver.</p>
+<div class="card">
+<p><span class="why">Precision matters here.</span> The objection is <strong>not</strong> to declaring a schema in bronze. It is to <strong>casting to strict types at read time</strong>. Declaring names and column order explicitly is still correct and still recommended; <code>inferSchema</code> is still wrong. Only the <em>types</em> changed.</p>
+</div>
+
+<h3>The three "store it as-is" types</h3>
+<table>
+<tr><th>Type</th><th>What gets stored</th><th>Use for</th></tr>
+<tr><td><code>STRING</code> <span class="done">← ours</span></td><td>The characters exactly as they arrived: <code>"9839.64"</code></td><td>Flat files — CSV, TSV, plain text</td></tr>
+<tr><td><code>VARIANT</code></td><td>Nested data with its structure intact — <code>id</code> and <code>tags</code> stay readable later without ever having been declared. Storing raw JSON as a string would work but forces a re-parse on every query.</td><td>JSON, API responses, event payloads <em>(relevant in Phase 2)</em></td></tr>
+<tr><td><code>BINARY</code></td><td>The exact bytes. Nothing is read or interpreted at all.</td><td>Images, PDFs, undecoded formats <em>(not used in this project)</em></td></tr>
+</table>
+<p>All three do the same job — <strong>store it now, understand it later</strong>. They differ only in how complicated the stored thing is.</p>
+
+<h2>Revised bronze schema — <code>workspace.bronze.transactions</code></h2>
+<pre><code>from pyspark.sql.types import StructType, StructField, StringType
+
+transactions_schema = StructType([
+    StructField("step",           StringType(), True),
+    StructField("type",           StringType(), True),
+    StructField("amount",         StringType(), True),
+    StructField("nameOrig",       StringType(), True),
+    StructField("oldbalanceOrg",  StringType(), True),
+    StructField("newbalanceOrig", StringType(), True),
+    StructField("nameDest",       StringType(), True),
+    StructField("oldbalanceDest", StringType(), True),
+    StructField("newbalanceDest", StringType(), True),
+    StructField("isFraud",        StringType(), True),
+    StructField("isFlaggedFraud", StringType(), True),
+])</code></pre>
+<pre><code>df = (
+    spark.read
+    .format("csv")
+    .option("header", "true")
+    .option("enforceSchema", "false")
+    .schema(transactions_schema)
+    .load(source_file)
+)</code></pre>
+<p>Eleven strings again — but <strong>by decision this time, not by Spark's default</strong>. Audit columns (<code>source_file</code>, <code>ingest_timestamp</code>, <code>batch_date</code>) are unaffected and still added after the read.</p>
+
+<h2>What did <em>not</em> change</h2>
+<table>
+<tr><th>Decision</th><th>Still correct because…</th></tr>
+<tr><td>Explicit schema, never <code>inferSchema</code></td><td>Inference costs a second full pass and lets the source silently redefine the table's shape (Note 05).</td></tr>
+<tr><td>Column names and order declared</td><td>Still the contract. Order is positional; names must match the header exactly, ugly ones included.</td></tr>
+<tr><td><code>enforceSchema = "false"</code></td><td>Still the guard that turns a silent column swap into a loud failure (Note 06).</td></tr>
+<tr><td>All fields nullable</td><td>Bronze accepts whatever arrives; enforcement is silver's job.</td></tr>
+</table>
+
+<h2>Knock-on effects</h2>
+<table>
+<tr><th>Item</th><th>Resolution</th></tr>
+<tr><td>Open question: <code>DOUBLE</code> vs <code>DECIMAL</code> for <code>amount</code> (Note 05)</td><td class="done">Dissolved at bronze. It becomes a <strong>silver</strong> decision, made where transformation is permitted.</td></tr>
+<tr><td>Note 05's "amount sorts wrong" lesson</td><td>Still true, and now a <em>known, accepted property</em> of bronze rather than a bug. Nobody runs analytics against bronze. Silver's casting step is what fixes it — and a value that fails to cast becomes a quarantined row <strong>with a reason attached</strong>, instead of a silent null.</td></tr>
+<tr><td>Note 03 bronze schema table</td><td>Marked superseded in place; names and order still stand.</td></tr>
+</table>
+
+<h2>The alternative we did not choose</h2>
+<p>A second legitimate approach keeps typed columns in bronze <em>and</em> adds a rescue mechanism — <code>columnNameOfCorruptRecord</code> for CSV, or Auto Loader's <code>_rescued_data</code> — so unparseable values are captured rather than destroyed. That also preserves replayability.</p>
+<p><span class="why">What is never acceptable</span> is typed bronze with neither — which is exactly what the first draft of this pipeline had. Being able to explain this trade-off is worth more than having picked the fashionable option.</p>
+
+<h2>Sources</h2>
+<ul>
+<li><a href="https://learn.microsoft.com/en-us/azure/databricks/lakehouse/medallion">What is the medallion lakehouse architecture? — Azure Databricks, Microsoft Learn</a></li>
+<li><a href="https://docs.databricks.com/aws/en/lakehouse/medallion">What is the medallion lakehouse architecture? — Databricks on AWS</a></li>
+<li><a href="https://community.databricks.com/t5/data-engineering/best-practices-for-designing-bronze-layer-with-sql-server-source/td-p/127188">Best Practices for Designing Bronze Layer — Databricks Community</a></li>
+</ul>
+
+<p class="learn"><strong>You learn:</strong> that "schema-on-read" means declaring shape without imposing types, why casting at ingestion destroys replayability, the difference between STRING / VARIANT / BINARY, and — most usefully — that a design document can contradict itself, so rules must be checked against the tables beneath them.</p>
+
+<!-- ============================================================ NOTE 08 -->
+<div class="note-header" id="note08">Note 08 — Idempotency: Breaking Append, Choosing replaceWhere <span class="note-date">· August 2026</span></div>
+
+<h2>The experiment: run the same notebook three times</h2>
+<p>The rung-1 write was <code>mode("append")</code>. The notebook ran three times (two on Aug 11, one on Aug 12) — each run appended the full day-1 file again. Nothing errored. The table reported June 1 as having 1,722,765 transactions when reality had 574,255. Every downstream number would inherit the 3× lie.</p>
+
+<div class="card">
+<p><strong>The diagnosis query, and why it worked:</strong></p>
+<pre><code>SELECT batch_date, ingest_timestamp, COUNT(*)
+FROM workspace.bronze.transactions
+GROUP BY batch_date, ingest_timestamp</code></pre>
+<p><code>GROUP BY</code> returns one row per <strong>unique combination</strong> of the listed columns. One distinct <code>batch_date</code> × three distinct <code>ingest_timestamp</code>s = three rows of 574,255 each — the three loads, individually visible. Grouped by <code>batch_date</code> alone it would have shown a single 1.72M row and hidden the evidence. <span class="why">Debugging principle: group by the column that distinguishes the thing you suspect.</span> Suspecting multiple runs → group by the column that differs per run. This is also the audit columns paying rent: without <code>ingest_timestamp</code>, the three loads would be indistinguishable.</p>
+</div>
+
+<h2>Why not UPSERT/MERGE (the course's answer)</h2>
+<table>
+<tr><th>Consideration</th><th>Finding for our source</th></tr>
+<tr><td>What MERGE is for</td><td>Sources whose rows <em>change</em>: customer addresses, order statuses. Incoming rows carry corrections; match on a key, update matches, insert the rest.</td></tr>
+<tr><td>Our source (Note 03 interview)</td><td>Append-only <strong>event data</strong>. A transaction never changes after it happens. There is nothing to update, ever.</td></tr>
+<tr><td>Our actual disease</td><td>Not "rows arrived with new versions" — <strong>"the same file got loaded twice."</strong> Different disease, different cure.</td></tr>
+<tr><td>The killer: no key</td><td>PaySim has no transaction ID. A composite key (<code>nameOrig + step + amount + nameDest</code>) would collide on two <em>legitimate</em> identical payments in the same hour — MERGE would silently drop real data. <span class="why">An UPSERT without a trustworthy key quietly destroys data — worse than a visible triple-load.</span></td></tr>
+</table>
+<p><strong>Conclusion:</strong> for a file-drop source, the unit of idempotency is the <strong>batch</strong>, not the row. Row-level MERGE enters later (gold aggregates are genuinely mutable; real sources have real keys). Same toolbox, different shelf.</p>
+
+<h2>The fix: scoped overwrite</h2>
+<pre><code>(bronze_df.write
+    .format("delta")
+    .mode("overwrite")
+    .option("replaceWhere", f"batch_date='{batch_date}'")
+    .saveAsTable(table_name))</code></pre>
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>What does <code>replaceWhere</code> do?</td><td>One atomic transaction: <em>delete every existing row matching the predicate, insert the incoming rows.</em> Scope: only <code>batch_date='2026-06-01'</code>. Other days untouched.</td></tr>
+<tr><td>How did one run clean up 1.72M rows?</td><td>All three loads carried the same <code>batch_date</code> — so all 1,722,765 rows matched the predicate, were removed, and were replaced by one fresh 574,255. The mess and the fix used the same mechanism.</td></tr>
+<tr><td>Why <code>overwrite</code> and not <code>append</code>?</td><td><code>append</code>'s contract is "add rows, <em>touch nothing existing</em>" — the opposite of replacement. <code>replaceWhere</code> is replacement semantics, so it belongs to the overwrite family: "the final state of this scope IS the incoming data." The two named together read oddly but mean: overwrite, <em>limited to the predicate</em>.</td></tr>
+<tr><td>Does Delta physically delete rows?</td><td>No — Delta never edits files in place. The transaction log marks the old Parquet files as removed and adds new ones. Old versions remain reachable (<code>DESCRIBE HISTORY</code>, time travel) until <code>VACUUM</code>. "Delete" is a bookkeeping entry, which is what makes the whole operation atomic.</td></tr>
+</table>
+
+<h2>Proof of idempotency</h2>
+<p>Three consecutive runs of the fixed notebook → the diagnosis query returns <strong>one row: 574,255</strong>, single <code>ingest_timestamp</code> (the latest run's). Rerun-count no longer affects final state — the definition of idempotent.</p>
+
+<h2>Trade-off recorded</h2>
+<p><code>replaceWhere</code> reruns <em>rewrite</em> the batch (new <code>ingest_timestamp</code>, new files). The alternative — a processed-files log in <code>ops</code> that <em>skips</em> known files — never rewrites but needs an extra table and check. Chosen: <code>replaceWhere</code> for simplicity; the <code>ops</code> log arrives later for observability, not dedup. Rung 3 (<code>COPY INTO</code>) automates file tracking; rung 4 (Auto Loader) adds checkpoints — both are this same idea with more machinery.</p>
+
+<p class="learn"><strong>You learn:</strong> idempotency as the core ingestion property, GROUP BY as a debugging instrument, why event data doesn't get UPSERTed and keyless MERGE is dangerous, replaceWhere's atomic delete-and-insert semantics, and Delta's transaction log making "delete" a metadata operation.</p>
+
+<!-- ============================================================ NOTE 09 -->
+<div class="note-header" id="note09">Note 09 — Profiling Results &amp; What Fraud Actually Means <span class="note-date">· August 2026</span></div>
+
+<p>Seven queries run against 1,068,592 bronze rows (batches 2026-06-01 → 06-05). Method: <strong>predict first, then query</strong> — a surprise only counts if you committed to an expectation.</p>
+
+<h2>The eight findings</h2>
+<table>
+<tr><th>#</th><th>Finding</th><th>Consequence</th></tr>
+<tr><td>1</td><td><span class="why">The legacy rule is a total failure.</span> <code>isFlaggedFraud</code> = 0 on all 1,068,592 rows. It flagged <strong>0 of 1,404 frauds</strong>.</td><td><strong>The project's business case.</strong> Note: this is a <em>rule engine</em> ("flag transfers &gt; 200,000"), not a model. No transaction in 5 days was large enough to trip it. Rules are brittle — fraudsters simply stay under the threshold.</td></tr>
+<tr><td>2</td><td>Fraud is rare: <strong>1,404 / 1,068,592 = 0.131%</strong></td><td>Severe class imbalance. Accuracy becomes a garbage metric — "never fraud" scores 99.87%. Phase 5 needs precision/recall, and the full 31 days, because 1,404 positives is thin for training.</td></tr>
+<tr><td>3</td><td>Fraud occurs in <strong>exactly two types</strong>: TRANSFER (695, 0.785%) and CASH_OUT (709, 0.188%). PAYMENT / CASH_IN / DEBIT: zero across a million rows.</td><td>Recorded as an <em>observation on a sample</em>, not a hardcoded rule — re-verify on all 31 days. True for PaySim (the simulator only generates fraud this way); would be false in real data, where card, ATM and payment fraud all exist. A limitation of synthetic data.</td></tr>
+<tr><td>4</td><td><strong>The mule pairing is visible in the totals:</strong> 695 TRANSFER frauds vs 709 CASH_OUT frauds — nearly 1:1.</td><td>Evidence for transfer-then-cash-out pairs. Proving it row-by-row is the strongest planned gold feature.</td></tr>
+<tr><td>5</td><td><strong>Drain-to-zero is a powerful signal:</strong> 97.8% of fraud rows (1,373/1,404) vs 22.8% of normal rows (243,373/1,067,188) — <strong>4.3× lift</strong>.</td><td>A <em>feature</em>, not a rule. 243,373 legitimate rows also drain to zero, so it shifts a probability rather than deciding a verdict. This distinction is the whole difference between the failed rule engine and a model.</td></tr>
+<tr><td>6</td><td><strong>Balances mostly don't reconcile:</strong> TRANSFER 94.7%, CASH_OUT 88.6%, PAYMENT 50.7%, DEBIT 30.6% fail <code>before − amount = after</code>.</td><td>A property of the source, not a pipeline bug. <span class="why">Flag, never quarantine</span> — quarantining 94% of TRANSFERs would destroy the dataset.</td></tr>
+<tr><td>7</td><td><strong>Zero is a sentinel for "balance unknown,"</strong> not an actual zero balance.</td><td>A magic value masquerading as data — the most dangerous dirt, because it is silently valid. Needs its own boolean column in silver.</td></tr>
+<tr><td>8</td><td><strong>Structurally clean:</strong> exactly 5 types, no nulls, no non-positive amounts.</td><td>Cheap expectations that should never fire. If one ever does, something upstream changed.</td></tr>
+</table>
+
+<h2>The meta-lesson: a check that fails everything is a broken check</h2>
+<div class="card">
+<p>The reconciliation query reported <strong>230,168 of 230,168 CASH_IN rows broken — 100%</strong>. A 100% failure rate is never a data problem.</p>
+<p>The rule was wrong: CASH_IN is money coming <em>in</em>, so <code>before + amount = after</code>. The query subtracted. <span class="why">Junior instinct: "the data is terrible, file a bug." Senior instinct: "100% is suspicious — re-read my own rule first."</span></p>
+<p>The mirror image is equally true: if a check <em>passes</em> 100% of the time, verify it is capable of failing at all.</p>
+</div>
+
+<h2>SQL patterns learned (worth keeping)</h2>
+<table>
+<tr><th>Pattern</th><th>Why it works / why it matters</th></tr>
+<tr><td><code>SUM(CAST(flag AS INT))</code> counts a 0/1 column</td><td>Each 0 adds nothing, each 1 adds exactly one — the sum <em>is</em> the count. <span class="why">Does not work for 'Y'/'N':</span> <code>CAST('Y' AS INT)</code> returns <strong>null</strong>, SUM skips nulls, and you get 0 frauds with no error. Use <code>SUM(CASE WHEN flag='Y' THEN 1 ELSE 0 END)</code>.</td></tr>
+<tr><td><code>100.0 *</code>, never <code>100 *</code></td><td>Integer ÷ integer truncates. <code>70900/377263 = 0.188</code> → <strong>0</strong>. Every percentage prints as 0.000 and nothing warns you. <span class="why">Rule: when dividing two counts, force one side to decimal.</span></td></tr>
+<tr><td><code>SUM(CASE WHEN … THEN 1 ELSE 0 END)</code> vs <code>WHERE</code></td><td><strong>WHERE deletes rows; CASE WHEN labels them.</strong> After WHERE removes the good rows you have no denominator — "334,368 broken" out of what? CASE WHEN keeps every row, so <code>COUNT(*)</code> and <code>SUM(...)</code> both survive and you get a <em>rate</em>, per group, in one pass. (<code>COUNT(CASE WHEN … THEN 1 END)</code> does the same via nulls.)</td></tr>
+<tr><td><code>ABS(diff) &gt; 0.01</code>, never <code>&lt;&gt; 0</code></td><td>DOUBLE stores decimals in binary; most have no exact form, so arithmetic leaves dust (<code>0.0000000000002</code> instead of 0). Exact-equality would flag balanced rows as broken. 0.01 = one cent; smaller is noise. <span class="why">Never test floats for exact equality.</span> Also why banks store money as DECIMAL.</td></tr>
+<tr><td><code>GROUP BY</code> returns only combinations that <em>exist</em></td><td>Two 0/1 columns could yield 4 rows; we got 2, because <code>isFlaggedFraud=1</code> never occurs. <strong>You will never see COUNT(*) = 0 in a GROUP BY result.</strong> Absent categories vanish silently — the fix when you need them is a LEFT JOIN from a reference list. Will matter in gold (a customer with no transactions that day).</td></tr>
+<tr><td><code>COUNT(*) − COUNT(col)</code> = null count</td><td><code>COUNT(*)</code> counts rows; <code>COUNT(col)</code> counts non-null values. <span class="why">Does not catch <code>''</code></span> — an empty string is a value, not a null. In CSV, "missing" is a spectrum: null, <code>''</code>, <code>' '</code>, <code>'NULL'</code>, <code>'N/A'</code>, <code>'-'</code>. Check blanks as well as nulls on text columns.</td></tr>
+<tr><td><code>AND balance_before &gt; 0</code> in the drain check</td><td>Without it, accounts that were <em>already empty</em> (0 → 0) count as "drained" — nothing was taken because nothing was there. "Drained" requires both halves: there was money, and afterwards there wasn't.</td></tr>
+</table>
+
+<h2>The confusion matrix (learned from query 4)</h2>
+<p><code>isFraud</code> and <code>isFlaggedFraud</code> are not two degrees of certainty about the same thing. They are <strong>two different actors</strong>: <code>isFraud</code> is <em>the truth</em> (what actually happened, known after the fact); <code>isFlaggedFraud</code> is <em>a prediction</em> (what the rule engine guessed at the time).</p>
+<table>
+<tr><th></th><th>Rule said "fraud"</th><th>Rule said "fine"</th></tr>
+<tr><td><strong>Actually fraud</strong></td><td>(1,1) true positive — <span class="done">the goal</span></td><td>(1,0) missed it — <span class="why">1,404 rows</span></td></tr>
+<tr><td><strong>Actually fine</strong></td><td>(0,1) false alarm — expensive: a real customer blocked at checkout</td><td>(0,0) correctly ignored — 1,067,188 rows</td></tr>
+</table>
+<p>This is the <strong>confusion matrix</strong>, how every fraud model on earth is evaluated. Our result: two cells populated, both in the "rule said fine" column. Phase 5 builds one of these for our own model.</p>
+
+<h2>What actually counts as fraud?</h2>
+<p><strong>In PaySim:</strong> fraud is defined by <em>provenance</em>, not behaviour — the simulator has fraud agents that take over accounts and drain them, and <code>isFraud=1</code> means "generated by a fraud agent." Perfect ground truth, which exists nowhere in reality.</p>
+<p><strong>In a real bank:</strong> fraud is whatever an <em>investigation confirmed</em>. A customer disputes a charge, an analyst reviews, a case closes as confirmed or not. So labels are <strong>late</strong> (weeks), <strong>incomplete</strong> (undetected fraud stays labelled 0 forever) and <strong>subjective</strong> (an analyst decided). A model learns from human judgements, not truth.</p>
+
+<h3>Different definitions, even inside one bank</h3>
+<table>
+<tr><th>Team</th><th>What they call fraud</th></tr>
+<tr><td>Card fraud</td><td>Stolen card / card-not-present. Victim is usually the bank or merchant.</td></tr>
+<tr><td>Account takeover</td><td>Someone else got into your account. <span class="done">Closest to PaySim.</span></td></tr>
+<tr><td>Scams (APP fraud)</td><td><em>You</em> made the payment — because a criminal tricked you. Contentious: you authorised it, so is it fraud? UK regulators forced reimbursement; other jurisdictions haven't.</td></tr>
+<tr><td>First-party fraud</td><td>The customer <em>is</em> the fraudster — takes a loan intending never to repay. Often classified as credit risk, not fraud.</td></tr>
+<tr><td>AML</td><td>Money laundering. Separate team, separate regulator, separate systems. The movement may be legitimate; the <em>source</em> is criminal.</td></tr>
+<tr><td>Application fraud</td><td>Fake or synthetic identity at signup.</td></tr>
+</table>
+<div class="card">
+<p>Same bank, six teams, six definitions, six models — and boundary disputes are constant, because budget and blame follow the classification.</p>
+<p class="why">Practical rule: never accept a label column without asking who created it, when, and by what process.</p>
+</div>
+
+<p class="learn"><strong>You learn:</strong> profiling as evidence-gathering, the SQL patterns above (integer division, CASE WHEN vs WHERE, float tolerance, GROUP BY's data-driven groups), confusion matrices, rules vs features, class imbalance, and that "fraud" is an organisational definition rather than a fact.</p>
+
+<!-- ============================================================ NOTE 10 -->
+<div class="note-header" id="note10">Note 10 — Silver Design Specification <span class="note-date">· August 2026</span></div>
+
+<h2>What silver is for</h2>
+<div class="card">
+<p><strong>Same rows, made trustworthy and usable.</strong> Grain is unchanged — one transaction, one row. Three jobs: cast text to real types, rename to clean names, and add <em>derived</em> columns that answer questions a raw row cannot. Nothing is aggregated; that is gold's job.</p>
+<p>Why bother: every fraud question needs those derived columns. Compute them <strong>once, correctly, here</strong> — or fifty analysts each write their own broken version of "did this drain the account."</p>
+</div>
+
+<h3>Before and after</h3>
+<pre><code>BRONZE (text, ugly names, no event time, no signal)
+step=1  type=TRANSFER  amount="181.0"  nameOrig="C1305486145"
+oldbalanceOrg="181.0"  newbalanceOrig="0.0"  isFraud="1"
+
+SILVER
+event_timestamp       = 2026-06-01 01:00:00
+txn_type              = TRANSFER
+amount                = 181.00
+sender_id             = C1305486145
+sender_balance_before = 181.00
+sender_balance_after  = 0.00
+balance_reconciles    = true
+sender_emptied        = true
+drain_ratio           = 1.00
+is_fraud              = true</code></pre>
+
+<h2>How the column list was derived (the method, not the answer)</h2>
+<table>
+<tr><th>Rule</th><th>Applied here</th></tr>
+<tr><td>1. Keep everything from bronze</td><td>Silver isn't about dropping columns; it's about making them usable. Drop only what is genuinely meaningless — note <code>isFlaggedFraud</code> survives despite being all zeros, because "useless data" and "evidence the old system failed" are different things.</td></tr>
+<tr><td>2. Rename what's wrong</td><td><code>oldbalanceOrg</code>/<code>newbalanceOrig</code> are inconsistent and a trap; <code>type</code> is a SQL reserved word. Names are fixed exactly once, here.</td></tr>
+<tr><td>3. Cast what gets used numerically</td><td>Anything used in arithmetic or comparison. <code>nameOrig</code> stays a string forever — you never add two account IDs.</td></tr>
+<tr><td>4a. Derive from <strong>profiling findings</strong></td><td>Balances don't reconcile → <code>balance_reconciles</code>. Zero means unknown → <code>sender_balance_unknown</code>. The <code>M</code> prefix → <code>is_receiver_merchant</code>.</td></tr>
+<tr><td>4b. Derive from <strong>consumer questions</strong></td><td>"Was the account drained?" → <code>sender_emptied</code>. "How much of the balance moved?" → <code>drain_ratio</code>. "When did it happen?" → <code>event_timestamp</code>.</td></tr>
+</table>
+<p><strong>Test for belonging in silver:</strong> computable from a <em>single row</em> (aggregates belong in gold) · more than one consumer wants it · easy to get wrong. <code>drain_ratio</code> passes all three — one division, universally needed, and forgetting the divide-by-zero case is a classic bug.</p>
+<p class="why">This is why profiling came first: the column list is literally derived from it. Designing silver before profiling would have missed <code>sender_balance_unknown</code> entirely, because we wouldn't have known zero was a lie.</p>
+
+<h2>Table: <code>workspace.silver.transactions</code></h2>
+<table>
+<tr><th>Silver column</th><th>From</th><th>Type</th><th>Notes</th></tr>
+<tr><td><code>event_timestamp</code></td><td><code>batch_date</code> + <code>step</code></td><td>TIMESTAMP</td><td>date + <code>(step-1) % 24</code> hours</td></tr>
+<tr><td><code>step</code></td><td><code>step</code></td><td>INT</td><td>kept — useful for ordering</td></tr>
+<tr><td><code>txn_type</code></td><td><code>type</code></td><td>STRING</td><td>renamed (reserved word)</td></tr>
+<tr><td><code>amount</code></td><td><code>amount</code></td><td>DECIMAL(18,2)</td><td>exact decimal arithmetic; see decision below</td></tr>
+<tr><td><code>sender_id</code></td><td><code>nameOrig</code></td><td>STRING</td><td></td></tr>
+<tr><td><code>sender_balance_before</code></td><td><code>oldbalanceOrg</code></td><td>DECIMAL(18,2)</td><td>ugly source name dies here</td></tr>
+<tr><td><code>sender_balance_after</code></td><td><code>newbalanceOrig</code></td><td>DECIMAL(18,2)</td><td></td></tr>
+<tr><td><code>receiver_id</code></td><td><code>nameDest</code></td><td>STRING</td><td></td></tr>
+<tr><td><code>receiver_balance_before</code></td><td><code>oldbalanceDest</code></td><td>DECIMAL(18,2)</td><td></td></tr>
+<tr><td><code>receiver_balance_after</code></td><td><code>newbalanceDest</code></td><td>DECIMAL(18,2)</td><td></td></tr>
+<tr><td><code>is_fraud</code></td><td><code>isFraud</code></td><td>BOOLEAN</td><td>ground-truth label</td></tr>
+<tr><td><code>flagged_by_legacy_rule</code></td><td><code>isFlaggedFraud</code></td><td>BOOLEAN</td><td>the model's baseline to beat</td></tr>
+</table>
+
+<h3>Derived columns — the reason silver exists</h3>
+<table>
+<tr><th>Column</th><th>Rule</th></tr>
+<tr><td><code>is_receiver_merchant</code></td><td><code>receiver_id</code> starts with <code>M</code></td></tr>
+<tr><td><code>sender_balance_unknown</code></td><td>before = 0 AND after = 0 AND amount &gt; 0 → the zero is a sentinel, not a fact</td></tr>
+<tr><td><code>balance_reconciles</code></td><td><span class="why">Direction-aware:</span> CASH_IN expects <code>before + amount = after</code>; all other types <code>before − amount = after</code>; tolerance 0.01. <strong>Null</strong> when <code>sender_balance_unknown</code> — you cannot check math on unknown values.</td></tr>
+<tr><td><code>sender_emptied</code></td><td>before &gt; 0 AND after = 0 <em>(both halves required — see Note 09 finding 5)</em></td></tr>
+<tr><td><code>drain_ratio</code></td><td><code>amount / sender_balance_before</code>, null when before = 0. The strongest single-row fraud feature: 1.0 = took everything.</td></tr>
+</table>
+<p>Audit columns carried through unchanged: <code>source_file</code>, <code>ingest_timestamp</code>, <code>batch_date</code>.</p>
+
+<h2>Decisions made, with reasoning</h2>
+<table>
+<tr><th>Question</th><th>Decision</th><th>Why</th></tr>
+<tr><td><code>amount</code>: DOUBLE or DECIMAL?</td><td><strong>DECIMAL(18,2)</strong></td><td>DECIMAL stores exact decimal values — 100.10 is exactly 100.10. DOUBLE's imprecision is <em>the reason</em> the reconciliation check needs a 0.01 tolerance in the first place. Banks use DECIMAL for money. <span class="done">Resolves the open question left in Note 05.</span></td></tr>
+<tr><td>Broken reconciliation: quarantine or flag?</td><td><strong>Flag</strong></td><td>94.7% of TRANSFERs fail. Quarantining would destroy the dataset. The failure describes source quality; it does not judge the row.</td></tr>
+<tr><td><code>balance_reconciles</code> nullable?</td><td><strong>Yes, deliberately</strong></td><td>Null means "couldn't check" — honestly different from false, which means "check failed."</td></tr>
+<tr><td>Keep <code>isFlaggedFraud</code>?</td><td><strong>Keep, renamed</strong></td><td>It is the baseline the model must beat: "the old rule caught 0 of 1,404; the model catches N%." Dropping it would discard the project's own business case.</td></tr>
+<tr><td>Two timestamps — why both?</td><td><strong>Both, always</strong></td><td><code>ingest_timestamp</code> = <em>processing time</em>, answers pipeline questions ("did the rerun replace the rows?"). <code>event_timestamp</code> = <em>event time</em>, answers business questions ("how many transactions in the last hour?"). Every fraud signal depends on event time — ask velocity questions with ingest time and every row looks simultaneous. They drift apart in reality when files arrive late.</td></tr>
+</table>
+
+<p class="learn"><strong>You learn:</strong> what a cleaning layer is actually for, how to derive a column list from evidence rather than imagination, event time vs processing time, DECIMAL vs DOUBLE for money, and flag-vs-quarantine as a data quality decision driven by measured failure rates.</p>
+
+<div class="footer">Project Notes · Fraud Detection Lakehouse · new notes get appended to this file (HTML) and project-notes.docx</div>
+
+</div>
+</body>
+</html>

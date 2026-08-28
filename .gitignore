@@ -1,6 +1,10 @@
 # Databricks CLI credentials
 .databrickscfg
 
+# Data files — too big for git; landing zone lives in Unity Catalog volumes
+data/
+paysim.csv
+
 # Databricks Asset Bundle build output
 .databricks/
 
