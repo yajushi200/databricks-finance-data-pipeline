@@ -7,6 +7,11 @@
 
 # COMMAND ----------
 
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, StructField, StructType
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Using widgets we are gonna pass the input parameters as batch_date
 
@@ -21,11 +26,7 @@ v_batch_date = dbutils.widgets.get("p_batch_date")
 
 # COMMAND ----------
 
-landing_folder_path
-
-# COMMAND ----------
-
-source_file=f"{landing_folder_path}/transactions.csv"
+source_file=f"{landing_base_path}/date={v_batch_date}/transactions.csv"
 
 # COMMAND ----------
 
@@ -33,7 +34,7 @@ table_name = "workspace.bronze.transactions"
 
 # COMMAND ----------
 
-from pyspark.sql.types import StructType, StructField, StringType
+
 
 transactions_schema = StructType([
     StructField("step",           StringType(), True),
@@ -70,7 +71,7 @@ print("rows:", df.count())
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
+
 bronze_df =(df
     .withColumn("source_file",F.col("_metadata.file_path"))
     .withColumn("ingest_timestamp",F.current_timestamp())

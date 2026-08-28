@@ -8,7 +8,7 @@
 
 # COMMAND ----------
 
-landing_folder_path = f"/Volumes/workspace/bronze/landing/date={v_batch_date}"
+landing_base_path = "/Volumes/workspace/bronze/landing"
 
 # COMMAND ----------
 

@@ -58,6 +58,15 @@
   .learn strong { color: var(--ink); }
   .tree { line-height: 1.5; }
   .done { color: #2e7d32; }
+  figure { margin: 20px 0; }
+  figure img {
+    max-width: 100%; border: 1px solid var(--line); border-radius: 6px;
+    display: block; background: var(--card);
+  }
+  figcaption {
+    font-size: 0.85rem; color: var(--muted); font-style: italic;
+    margin-top: 8px; padding-left: 2px;
+  }
   .footer { margin-top: 60px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--line); padding-top: 16px; }
 </style>
 </head>
@@ -74,8 +83,9 @@
 <tr><td>Layer in progress</td><td><span class="done">Bronze complete</span> for 5 batches: <code>workspace.bronze.transactions</code>, <strong>1,068,592 rows</strong> (2026-06-01 → 06-05), all counts verified against source. <strong>Silver: designed (Note 10), not yet built.</strong></td></tr>
 <tr><td>Ingestion ladder</td><td>Rung 1 (naive append) built, deliberately broken, <span class="done">fixed with rung 2: <code>replaceWhere</code> per batch_date</span> (Note 08). Parameterized via widget <code>p_batch_date</code>. Rungs 3–4 later.</td></tr>
 <tr><td>Landing volume</td><td>All 31 daily folders uploaded via <code>databricks fs cp -r</code>. Days 6–31 ingest whenever needed — just a widget value.</td></tr>
-<tr><td>Working in</td><td>Databricks notebooks (<code>00_helpers/config</code>, <code>01_bronze/01_ingest_transactions</code>, <code>02_profile_bronze</code>). Repo not yet connected to workspace; <code>src/</code> + pytest start with silver.</td></tr>
-<tr><td>Next up</td><td>Write <code>src/transforms/silver_transactions.py</code> — a pure <code>to_silver(df)</code> function (no read/write inside) — casts and renames first, then derived columns, with pytest tests</td></tr>
+<tr><td>Working in</td><td>Databricks notebooks (<code>00_common</code>, <code>01_bronze</code>, <code>02_silver</code>), <span class="done">now committed to GitHub</span> — commit <code>27728d4</code>, 9 files (Note 11). Git folder in the workspace deferred; <code>src/</code> + pytest start with silver.</td></tr>
+<tr><td>CI status</td><td><span class="why">Run #2 red</span> — 13 × <code>F821 Undefined name 'spark'</code>: notebook globals don't exist to a plain-Python linter. Fix: ruff <code>builtins</code> in <code>pyproject.toml</code> (Note 11).</td></tr>
+<tr><td>Next up</td><td>1. Get CI green. &nbsp;2. Write <code>src/transforms/silver_transactions.py</code> — a pure <code>to_silver(df)</code> (no read/write inside), casts and renames first, then derived columns, with pytest tests — <strong>on a branch, as the first pull request</strong>.</td></tr>
 </table>
 </div>
 
@@ -109,7 +119,9 @@
 <a href="#note08">Note 08 — Idempotency: Breaking Append, Choosing replaceWhere</a> · <span style="font-size:0.9em;color:var(--muted)">the triple-load, batch vs UPSERT, how replaceWhere works</span><br>
 <strong>Understanding the data</strong><br>
 <a href="#note09">Note 09 — Profiling Results &amp; What Fraud Actually Means</a> · <span style="font-size:0.9em;color:var(--muted)">eight findings, SQL patterns, fraud definitions in real banks</span><br>
-<a href="#note10">Note 10 — Silver Design Specification</a> · <span style="font-size:0.9em;color:var(--muted)">every column, every derived rule, and where each came from</span>
+<a href="#note10">Note 10 — Silver Design Specification</a> · <span style="font-size:0.9em;color:var(--muted)">every column, every derived rule, and where each came from</span><br>
+<strong>Engineering practice</strong><br>
+<a href="#note11">Note 11 — First Real Commit &amp; Reading GitHub Actions</a> · <span style="font-size:0.9em;color:var(--muted)">git mechanics, what CI/CD is, why the first run went red</span>
 </div>
 
 <!-- ============================================================ NOTE 01 -->
@@ -869,6 +881,179 @@ is_fraud              = true</code></pre>
 </table>
 
 <p class="learn"><strong>You learn:</strong> what a cleaning layer is actually for, how to derive a column list from evidence rather than imagination, event time vs processing time, DECIMAL vs DOUBLE for money, and flag-vs-quarantine as a data quality decision driven by measured failure rates.</p>
+
+<!-- ============================================================ NOTE 11 -->
+<div class="note-header" id="note11">Note 11 — First Real Commit &amp; Reading GitHub Actions <span class="note-date">· 28 August 2026</span></div>
+
+<div class="card">
+<p><strong>Context:</strong> the repo had sat at 2 commits since July while all the real work — bronze ingestion, profiling, notes — lived only in the Databricks workspace and on the laptop. <span class="why">A repo with no commits reads as abandoned.</span> This session put the work into GitHub and, for the first time, watched CI actually run.</p>
+</div>
+
+<h2>Part 1 — Getting notebooks out of Databricks</h2>
+<p>Notebooks live in the Databricks workspace, not in the git repo. Two routes:</p>
+<table>
+<tr><th>Route</th><th>How</th><th>Verdict</th></tr>
+<tr><td><strong>Manual export</strong> <span class="done">← used</span></td><td>File → Export → Source file, per notebook</td><td>Fine for a one-off. Chosen because the goal that night was <em>seeing CI run</em>, not improving workflow.</td></tr>
+<tr><td>CLI export</td><td><code>databricks workspace export-dir /Workspace/Users/&lt;user&gt;/&lt;folder&gt; ./notebooks --profile free</code></td><td>One command for a whole folder — but still a snapshot; the sync problem returns tomorrow.</td></tr>
+<tr><td><strong>Git folder</strong> (proper fix, <em>deferred</em>)</td><td>Link a GitHub PAT in Databricks → Settings → Linked accounts, then clone the repo <em>into</em> the workspace and commit from the Databricks UI</td><td>The real answer, and on DP-750. Deferred deliberately: ~45 min of setup and it would likely break the <code>%run ../00_common/...</code> path mid-session. <span class="why">Workflow improvements are not progress.</span></td></tr>
+</table>
+
+<p>Repo structure mirrors the workspace exactly, so the two never drift:</p>
+<pre class="tree">notebooks/
+├── 00_common/01_environment_config.py
+├── 01_bronze/01_Ingest_transactions.py
+│            02_profile_bronze.sql
+└── 02_silver/02_Transform_transactions.py</pre>
+<p><em>Flattening into one folder would work today and hurt in a month, once bronze/silver/gold/helpers all coexist — and the <code>%run</code> paths would stop matching the repo layout.</em></p>
+
+<figure>
+  <img src="images/databricks-notebook-tree.png" alt="Databricks workspace showing Project-financial-pipeline with 00_common, 01_bronze and 02_silver folders">
+  <figcaption>The Databricks workspace tree the repo structure was copied from.</figcaption>
+</figure>
+
+<h2>Part 2 — The commit</h2>
+
+<h3>Reading <code>git status</code></h3>
+<p>It answers exactly one question: <strong>what is different between my folder and my last commit?</strong> Three sections — <em>staged</em> (after <code>git add</code>), <em>changes not staged</em> (tracked files you edited), <em>untracked</em> (files git has never seen).</p>
+
+<figure>
+  <img src="images/git-status.png" alt="git status output showing modified .gitignore and CLAUDE.md, and untracked docs, notebooks, scripts folders">
+  <figcaption><code>git status</code> before committing: two modified files, three new folders.</figcaption>
+</figure>
+
+<div class="card">
+<p><strong>How to verify it yourself, without asking anyone:</strong></p>
+<p>1. <strong>Mental diff.</strong> "What have I changed since the last commit?" — edited <code>.gitignore</code>, edited <code>CLAUDE.md</code>, created three folders. Five things. Git listed five things. Match.</p>
+<p>2. <span class="why">More important — what should <em>not</em> be there?</span> <code>paysim.csv</code> (471 MB) and <code>data/</code> sit right there in the folder, and neither appears in the list. <strong>That absence is <code>.gitignore</code> working.</strong> If a 471 MB file had appeared, that is the signal to stop before pushing something GitHub would reject.</p>
+</div>
+
+<h3>Two problems hit along the way</h3>
+<table>
+<tr><th>Problem</th><th>Cause &amp; fix</th></tr>
+<tr><td><code>fatal: Unable to create '.git/index.lock': File exists</code></td><td>Git creates <code>index.lock</code> before modifying the staging index and deletes it when done — a mutex so two git processes cannot corrupt the index at once. A crashed process leaves the lock behind and blocks everything after. Fix: <code>Remove-Item .git\index.lock -Force</code>, then verify with <code>Test-Path .git\index.lock</code> → <code>False</code>. <span class="why">Safe only when no git process is genuinely running.</span></td></tr>
+<tr><td>A screenful of <code>The term 'fatal:' is not recognized…</code></td><td>Old terminal output was pasted <em>back into</em> the terminal, so PowerShell tried to execute each line — <code>fatal:</code>, <code>Another</code>, <code>an</code>, <code>are</code> — as commands. Harmless noise, nothing ran. <strong>Habit: copy the command, never the <code>PS C:\…&gt;</code> prompt or the output.</strong></td></tr>
+</table>
+<p>Also seen: <code>warning: LF will be replaced by CRLF</code> on every file. Windows ends lines with CR+LF, Linux with LF; git normalises on checkout. Cosmetic — it only matters if it ever produces noisy diffs.</p>
+
+<h3>The commit and push</h3>
+<pre><code>git add .
+git commit -m "Add bronze ingestion, profiling queries, and project notes"
+git push</code></pre>
+<pre><code>[main 27728d4] Add bronze ingestion, profiling queries, and project notes
+ 9 files changed, 1166 insertions(+)
+...
+To https://github.com/yajushi200/databricks-finance-data-pipeline.git
+   5e596d5..27728d4  main -&gt; main</code></pre>
+
+<figure>
+  <img src="images/vscode-commit-push.png" alt="VS Code terminal showing successful git commit of 9 files and git push to GitHub">
+  <figcaption>9 files, 1,166 insertions, pushed. <code>5e596d5..27728d4</code> is the proof the remote moved.</figcaption>
+</figure>
+
+<div class="card">
+<p><span class="why">Verification lesson:</span> never judge git state from error messages that scrolled past. After any uncertain command, <code>git status</code> and <code>git log --oneline -3</code> report the actual truth. Git only prints a commit hash when a commit really happened; <code>git status</code> saying <em>"ahead of 'origin/main' by 1 commit"</em> is what tells you a push is still owed.</p>
+</div>
+
+<h2>Part 3 — What GitHub Actions actually is</h2>
+
+<p>The documentation says: <em>"a CI/CD platform that allows you to automate your build, test, and deployment pipeline… workflows that build and test every pull request, or deploy merged pull requests to production."</em> Mapped onto this project:</p>
+
+<table>
+<tr><th>Concept</th><th>In this repo</th></tr>
+<tr><td><strong>CI</strong> — continuous integration</td><td>On every push, automatically <em>verify</em>: <code>ruff</code> (lint) + <code>pytest</code>. <span class="done">Exists.</span> Currently tests nothing meaningful because <code>src/</code> is empty — it starts earning its keep the moment <code>to_silver()</code> has tests.</td></tr>
+<tr><td><strong>CD</strong> — continuous deployment</td><td>On merge to main, automatically <em>ship</em>: <code>databricks bundle deploy</code> run by Actions instead of by hand. <span class="why">Not built.</span> Comes after silver + gold + jobs exist — automating deployment of logic that changes daily means rewriting the automation daily.</td></tr>
+<tr><td>Build step</td><td>None. Python needs no compilation.</td></tr>
+<tr><td>Pull requests</td><td><code>ci.yml</code> already listens for them, but none have been opened — work goes straight to <code>main</code>. <span class="why">This is the gap.</span></td></tr>
+</table>
+
+<h3>Who names what</h3>
+<table>
+<tr><th>Name</th><th>Decided by</th></tr>
+<tr><td><code>.github/workflows/</code></td><td><strong>GitHub — fixed.</strong> This exact path is how workflows are discovered. Anywhere else and nothing runs.</td></tr>
+<tr><td><code>ci.yml</code></td><td>Us. Could be <code>build.yml</code>, <code>checks.yml</code> — any <code>.yml</code>. Convention only.</td></tr>
+<tr><td><code>name: CI</code> (inside the file)</td><td>Us. This is the title shown in the Actions sidebar.</td></tr>
+<tr><td><code>lint-and-test</code></td><td>Us — a job label. Could be <code>banana</code>; GitHub would show a red X next to <code>banana</code>.</td></tr>
+</table>
+
+<h3>The anatomy, against our own file</h3>
+<pre><code>name: CI
+on:                                    # EVENT — what triggers a run
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  lint-and-test:                       # JOB — one; several would run in parallel
+    runs-on: ubuntu-latest             # RUNNER — a fresh Linux VM, destroyed after
+    steps:
+      - uses: actions/checkout@v4      # ACTION — reusable, written by GitHub
+      - uses: actions/setup-python@v5  # ACTION  (@v4 / @v5 are version pins)
+        with:
+          python-version: "3.11"
+      - run: pip install ruff pytest   # SCRIPT — a shell command, same as typing it
+      - run: ruff check .              # SCRIPT
+      - run: pytest                    # SCRIPT</code></pre>
+<table>
+<tr><th>Piece</th><th>What to understand</th></tr>
+<tr><td><strong>Event</strong></td><td><code>on: push</code> means <em>pushing is the trigger</em> — not a schedule, not a button. One push → one run → one verdict. Other events: PRs, issues, releases, cron, manual <code>workflow_dispatch</code>.</td></tr>
+<tr><td><strong>Jobs</strong></td><td>Multiple jobs run <strong>in parallel</strong> by default, each on its own machine. <code>needs:</code> forces order — that is how a future deploy job waits for tests to pass.</td></tr>
+<tr><td><strong>Runner</strong></td><td>A brand-new VM that <strong>starts empty</strong> — which is why step 1 must check out the code. It also has no <code>paysim.csv</code> and no Databricks connection, so <span class="why">CI can only ever test logic, never our actual data.</span></td></tr>
+<tr><td><strong><code>uses:</code> vs <code>run:</code></strong></td><td><code>uses:</code> pulls in a packaged step from the Actions Marketplace. <code>run:</code> is literally a shell command on that VM.</td></tr>
+</table>
+<p><strong>Mental model:</strong> event → fresh VM → check out code → install tools → run my commands → report exit codes. A robot running your terminal commands on a clean machine, every push.</p>
+
+<h2>Part 4 — Run #2 went red</h2>
+
+<figure>
+  <img src="images/ci-runs-list.png" alt="GitHub Actions runs list: CI #1 green for Add project skeleton, CI #2 red for Add bronze ingestion">
+  <figcaption>Two runs — the entire history of the project. #1 green (nothing to break), #2 red.</figcaption>
+</figure>
+
+<p>Each row shows: status · the commit message that triggered it · run number and commit SHA · who pushed · branch · when · duration. That is a permanent audit trail: every push, forever, with its verdict.</p>
+
+<figure>
+  <img src="images/ci-run-summary.png" alt="GitHub Actions run summary page showing Failure status, 12s duration, triggered via push, and the lint-and-test job">
+  <figcaption>Run summary: <em>"Triggered via push"</em> is the causal link. <em>Re-run jobs</em> (top right) is for genuine flukes, not for wishing failures away.</figcaption>
+</figure>
+
+<h3>How to read a failed run</h3>
+<table>
+<tr><th>Icon / element</th><th>Meaning</th></tr>
+<tr><td>✅ green check</td><td>Step passed</td></tr>
+<tr><td>❌ red X</td><td>Step failed — <strong>this is where to look</strong></td></tr>
+<tr><td>⊘ grey slash</td><td><strong>Skipped.</strong> Pytest showed this because Ruff failed first and steps run in order. <span class="why">Not a second problem.</span></td></tr>
+<tr><td>Last line of the log</td><td><code>Error: Process completed with exit code 1.</code> — <strong>exit code 0 = success, anything else = failure.</strong> GitHub does not understand ruff or pytest; it only checks the exit code.</td></tr>
+</table>
+<p><strong>Two reading rules:</strong> scroll to the <em>first</em> error, not the last (errors cascade; the first is usually the cause); and read the summary line — <code>Found 13 errors. [*] 2 fixable with the --fix option.</code> gives scale and options in one line.</p>
+
+<figure>
+  <img src="images/ci-failed-ruff.png" alt="GitHub Actions log showing F821 Undefined name spark errors from ruff, 13 errors found, exit code 1">
+  <figcaption>The failure: <code>F821 Undefined name 'spark'</code> — 13 times.</figcaption>
+</figure>
+
+<h3>The actual failure, and why it is interesting</h3>
+<div class="card">
+<p><code>F821 Undefined name 'spark'</code> at <code>notebooks/01_bronze/01_Ingest_transactions.py:98:9</code>.</p>
+<p><strong>This is not a bug in the code.</strong> The notebook runs perfectly in Databricks, because the runtime <em>injects</em> <code>spark</code>, <code>dbutils</code> and <code>display</code> into every notebook session. Ruff is a plain-Python linter running on a bare VM, where those names genuinely do not exist.</p>
+<p class="why">The real lesson: notebooks are not quite Python, and CI just discovered it. That mismatch is exactly the class of thing CI exists to surface.</p>
+</div>
+
+<table>
+<tr><th>Fix option</th><th>Trade-off</th></tr>
+<tr><td><strong>A — declare the injected names</strong> via ruff's <code>builtins</code> setting in <code>pyproject.toml</code> <span class="done">← chosen</span></td><td>Silences only the false positives. Notebooks still get linted for <em>real</em> problems: unused imports, genuine typos.</td></tr>
+<tr><td>B — exclude <code>notebooks/</code> from ruff</td><td>One line, but notebooks are then never checked at all. Throws away the safety net to silence three names.</td></tr>
+</table>
+
+<h2>Standing habits adopted</h2>
+<table>
+<tr><th>Habit</th><th>Reason</th></tr>
+<tr><td><strong>Commit every working increment</strong>, not at the end of the project</td><td>Each commit is a save point to diff against. 50 small commits reads as professional; 2 giant ones reads as "built it, then uploaded it."</td></tr>
+<tr><td>GitHub is where work <em>lives</em>, not a deployment destination</td><td>The waterfall instinct — build everything, then push — is backwards.</td></tr>
+<tr><td>Copy commands from a terminal, never prompts or output</td><td>See the PowerShell incident above.</td></tr>
+<tr><td>After any uncertain git command: <code>git status</code> + <code>git log --oneline</code></td><td>The only reliable report of actual state.</td></tr>
+<tr><td><span class="why">Next: branch → PR → merge</span>, stop pushing straight to <code>main</code></td><td>Real teams never push to main. CI on a PR runs <strong>before</strong> code lands, so broken code never reaches main — the current setup only reports breakage <em>after</em>. Also a literal DP-750 objective ("manage branching, pull requests, and conflict resolution"). Silver will be built on a branch as the first PR.</td></tr>
+</table>
+
+<p class="learn"><strong>You learn:</strong> the git add → commit → push cycle and how to verify each stage, <code>index.lock</code> and why it exists, CI vs CD as separate ideas, the event/job/runner/step anatomy of a workflow, <code>uses:</code> vs <code>run:</code>, exit codes as the pass/fail mechanism, how to read a failed run bottom-up, and that a notebook's injected globals make notebooks subtly not-Python.</p>
 
 <div class="footer">Project Notes · Fraud Detection Lakehouse · new notes get appended to this file (HTML) and project-notes.docx</div>
 

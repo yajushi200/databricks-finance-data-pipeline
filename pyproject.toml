@@ -14,6 +14,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src"]
+builtins = ["spark", "dbutils", "display", "landing_base_path"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
